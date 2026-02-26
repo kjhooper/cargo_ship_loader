@@ -2,3 +2,10 @@ numpy
 matplotlib
 pillow
 pytest
+
+# Optional — needed for M1 (BayesianOptSolver)
+optuna
+
+# Optional — needed for M2 (NeuralRankerSolver)
+scikit-learn
+joblib

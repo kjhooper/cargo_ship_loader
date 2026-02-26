@@ -5,15 +5,16 @@ Run with:  conda run -n personal pytest tests.py -v
 
 Coverage
 --------
-1. Hull geometry          — valid cell counts, symmetry
+1. Hull geometry           — valid cell counts, symmetry
 2. Split-point consistency — balance fn / scorer / visualizer all agree
 3. Single-container balance — correct side reported by balance functions
-4. Symmetric placement    — perfect balance when containers are mirrored
-5. 40ft weight storage    — weight/2 per bay, consistent across all three systems
-6. Scorer direction       — scorer prefers positions that reduce imbalance
+4. Symmetric placement     — perfect balance when containers are mirrored
+5. 40ft weight storage     — weight/2 per bay, consistent across all three systems
+6. Scorer direction        — scorer prefers positions that reduce imbalance
 7. Greedy balance outcomes — end-to-end ratio >= 0.95 on multiple seeds
-8. Visualizer accumulator — panel.port_w / fore_w match ship balance functions
-9. Quadrant balance       — quadrant_balance() correctness and greedy diagonal fix
+8. Visualizer accumulator  — panel.port_w / fore_w match ship balance functions
+9. Quadrant balance        — quadrant_balance() correctness and greedy diagonal fix
+10. Solver balance         — all solvers achieve >= 0.92 PS and FA ratios
 """
 
 import random
@@ -630,3 +631,97 @@ class TestQuadrantBalance:
                 f"seed={seed}: {label}={q:.0f} is {100*frac:.1f}% of total — "
                 f"expected 20-30% (fp={fp:.0f} fs={fs:.0f} ap={ap:.0f} as={as_:.0f})"
             )
+
+
+# ---------------------------------------------------------------------------
+# 10. Solver balance — all solvers achieve >= 0.92 on PS and FA axes
+# ---------------------------------------------------------------------------
+
+def _make_containers(seed):
+    rng = random.Random(seed)
+    return (
+        [ShippingContainer(size=1, weight=round(rng.uniform(2_000, 28_000), 1))
+         for _ in range(60)]
+        + [ShippingContainer(size=2, weight=round(rng.uniform(2_000, 28_000), 1))
+           for _ in range(25)]
+    )
+
+
+class TestSolverBalance:
+    """Solver-agnostic balance test: PS and FA ratios must be >= 0.92."""
+
+    MIN_RATIO = 0.92
+
+    def _check_balance(self, ship, label, seed):
+        p, s = ship.port_starboard_balance()
+        f, a = ship.fore_aft_balance()
+        ps = min(p, s) / max(p, s) if max(p, s) > 0 else 1.0
+        fa = min(f, a) / max(f, a) if max(f, a) > 0 else 1.0
+        assert ps >= self.MIN_RATIO, (
+            f"{label} seed={seed}: PS ratio={ps:.3f} < {self.MIN_RATIO} "
+            f"(port={p:.0f} stbd={s:.0f})"
+        )
+        assert fa >= self.MIN_RATIO, (
+            f"{label} seed={seed}: FA ratio={fa:.3f} < {self.MIN_RATIO} "
+            f"(fore={f:.0f} aft={a:.0f})"
+        )
+
+    @pytest.mark.parametrize("seed", [42, 99])
+    def test_cargo_loader_balance(self, seed):
+        ship = make_ship()
+        CargoLoader(ship).load(_make_containers(seed))
+        self._check_balance(ship, "CargoLoader", seed)
+
+    @pytest.mark.parametrize("seed", [42, 99])
+    def test_beam_search_balance(self, seed):
+        BeamSearchSolver = pytest.importorskip(
+            "solvers", reason="solvers package not importable"
+        ).BeamSearchSolver
+        ship = make_ship()
+        BeamSearchSolver(ship, beam_width=3).load(_make_containers(seed))
+        self._check_balance(ship, "BeamSearchSolver(K=3)", seed)
+
+    @pytest.mark.parametrize("seed", [42, 99])
+    def test_simulated_annealing_balance(self, seed):
+        SimulatedAnnealingSolver = pytest.importorskip(
+            "solvers", reason="solvers package not importable"
+        ).SimulatedAnnealingSolver
+        ship = make_ship()
+        SimulatedAnnealingSolver(ship, n_iterations=500, seed=seed).load(
+            _make_containers(seed)
+        )
+        self._check_balance(ship, "SimulatedAnnealingSolver(I=500)", seed)
+
+    @pytest.mark.parametrize("seed", [42, 99])
+    def test_bayesian_opt_balance(self, seed):
+        solvers_mod = pytest.importorskip("solvers")
+        optuna = pytest.importorskip("optuna")  # noqa: F841
+        BayesianOptSolver = solvers_mod.BayesianOptSolver
+        ship = make_ship()
+        BayesianOptSolver(ship, n_trials=20, seed=seed).load(_make_containers(seed))
+        self._check_balance(ship, "BayesianOptSolver(n=20)", seed)
+
+    @pytest.mark.parametrize("seed", [42, 99])
+    def test_neural_ranker_balance(self, seed):
+        solvers_mod = pytest.importorskip("solvers")
+        pytest.importorskip("sklearn")
+        NeuralRankerSolver = solvers_mod.NeuralRankerSolver
+        ship = make_ship()
+        solver = NeuralRankerSolver(ship)
+        solver.fit(
+            n_episodes=50, beam_width=3, seed=seed,
+            ship_params=PANAMAX,
+        )
+        solver.load(_make_containers(seed))
+        # Neural ranker with limited training data — relaxed threshold of 0.90
+        p, s = ship.port_starboard_balance()
+        f, a = ship.fore_aft_balance()
+        ps = min(p, s) / max(p, s) if max(p, s) > 0 else 1.0
+        fa = min(f, a) / max(f, a) if max(f, a) > 0 else 1.0
+        min_ratio = 0.90
+        assert ps >= min_ratio, (
+            f"NeuralRankerSolver seed={seed}: PS ratio={ps:.3f} < {min_ratio}"
+        )
+        assert fa >= min_ratio, (
+            f"NeuralRankerSolver seed={seed}: FA ratio={fa:.3f} < {min_ratio}"
+        )

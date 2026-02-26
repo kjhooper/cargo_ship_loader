@@ -1,12 +1,65 @@
+from abc import ABC, abstractmethod
 from typing import List, Dict, Optional, Tuple
 
 from models import CargoShip, ShippingContainer
 
 
-class CargoLoader:
+class BaseSolver(ABC):
+    """Common interface for all cargo placement solvers."""
 
     def __init__(self, ship: CargoShip):
         self.ship = ship
+
+    @abstractmethod
+    def load(self, containers: List[ShippingContainer]) -> List[Dict]:
+        """Place all containers and return the placement manifest."""
+        ...
+
+    def final_score(self) -> float:
+        """Scalar quality metric in [0, 1]; higher is better.
+
+        Returns the mean of port/stbd ratio, fore/aft ratio, and diagonal
+        balance ratio.  A perfectly balanced load scores 1.0.
+        """
+        port_w, stbd_w = self.ship.port_starboard_balance()
+        fore_w, aft_w  = self.ship.fore_aft_balance()
+        fp, fs, ap, as_ = self.ship.quadrant_balance()
+
+        max_ps = max(port_w, stbd_w)
+        max_fa = max(fore_w, aft_w)
+        d1, d2 = fp + as_, fs + ap
+        max_d  = max(d1, d2)
+
+        ps_ratio   = min(port_w, stbd_w) / max_ps if max_ps > 0 else 1.0
+        fa_ratio   = min(fore_w, aft_w)  / max_fa if max_fa > 0 else 1.0
+        diag_ratio = min(d1, d2)         / max_d  if max_d  > 0 else 1.0
+
+        return (ps_ratio + fa_ratio + diag_ratio) / 3.0
+
+
+class CargoLoader(BaseSolver):
+    """Greedy single-pass solver.
+
+    Scorer weights are now constructor parameters — identical defaults to the
+    original hard-coded values, so existing code is fully backward-compatible.
+    """
+
+    def __init__(
+        self,
+        ship: CargoShip,
+        k_gz: float      = 5.0,
+        k_trim: float    = 4.0,
+        k_list: float    = 4.0,
+        k_diag: float    = 6.0,
+        k_stacking: float = 0.5,
+    ):
+        super().__init__(ship)
+        self.k_gz       = k_gz
+        self.k_trim     = k_trim
+        self.k_list     = k_list
+        self.k_diag     = k_diag
+        self.k_stacking = k_stacking
+
         self.manifest: List[Dict] = []
         # Running sums — all O(1) per placement
         self._moment_z = 0.0  # Σ wᵢ · tierᵢ  (for G_z / metacentric stability)
@@ -114,13 +167,13 @@ class CargoLoader:
         # K_diag > K_list guarantees aft-port beats aft-stbd when fore-port is heavy
         diag_norm = abs((new_fp + new_as) - (new_fs + new_ap)) / total_new
 
-        score  = -5.0 * gz_norm
-        score -= 4.0 * trim_norm
-        score -= 4.0 * list_norm
-        score -= 6.0 * diag_norm
+        score  = -self.k_gz       * gz_norm
+        score -= self.k_trim      * trim_norm
+        score -= self.k_list      * list_norm
+        score -= self.k_diag      * diag_norm
 
         if container.size == 2 and self._two_shorts_below(bay, col, tier):
-            score += 0.5
+            score += self.k_stacking
         return score
 
     # ------------------------------------------------------------------
