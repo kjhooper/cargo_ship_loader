@@ -1,6 +1,7 @@
 numpy
 matplotlib
 pillow
+plotly
 pytest
 streamlit
 
