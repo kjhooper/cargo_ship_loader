@@ -311,6 +311,9 @@ class NeuralRankerSolver(BaseSolver):
         weight_min: float = 2000.0,
     ) -> "NeuralRankerSolver":
         """Generate training data via Beam Search and fit the MLP."""
+        import time as _time
+        t0 = _time.perf_counter()
+
         if ship_params is None:
             ship_params = dict(
                 length     = self.ship.length,
@@ -337,6 +340,18 @@ class NeuralRankerSolver(BaseSolver):
         X_scaled = self._scaler.fit_transform(X)
         self._mlp.fit(X_scaled, y.astype(int))
         self._fitted = True
+
+        elapsed = _time.perf_counter() - t0
+        self.training_stats_: Dict[str, Any] = {
+            "elapsed_s":        round(elapsed, 2),
+            "n_episodes":       n_episodes,
+            "n_samples":        int(X.shape[0]),
+            "n_features":       int(X.shape[1]),
+            "n_iter":           int(self._mlp.n_iter_),
+            "loss_curve":       [round(v, 6) for v in self._mlp.loss_curve_],
+            "val_score_curve":  [round(v, 6) for v in getattr(self._mlp, "validation_scores_", [])],
+            "best_val_score":   round(float(getattr(self._mlp, "best_validation_score_", float("nan"))), 6),
+        }
         return self
 
     # ------------------------------------------------------------------
@@ -345,16 +360,21 @@ class NeuralRankerSolver(BaseSolver):
 
     def save(self, path: str) -> None:
         """Save the fitted scaler + MLP to *path* (via joblib)."""
-        joblib.dump({"scaler": self._scaler, "mlp": self._mlp}, path)
+        joblib.dump({
+            "scaler":         self._scaler,
+            "mlp":            self._mlp,
+            "training_stats": getattr(self, "training_stats_", {}),
+        }, path)
 
     @classmethod
     def load_model(cls, ship: CargoShip, path: str, **kwargs) -> "NeuralRankerSolver":
         """Load a previously saved model from *path*."""
         data   = joblib.load(path)
         solver = cls(ship, **kwargs)
-        solver._scaler = data["scaler"]
-        solver._mlp    = data["mlp"]
-        solver._fitted = True
+        solver._scaler        = data["scaler"]
+        solver._mlp           = data["mlp"]
+        solver._fitted        = True
+        solver.training_stats_ = data.get("training_stats", {})
         return solver
 
     # ------------------------------------------------------------------

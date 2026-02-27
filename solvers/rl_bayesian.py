@@ -288,6 +288,9 @@ class RLBayesianSolver(BaseSolver):
         ship_params: Optional[Dict[str, Any]] = None,
     ) -> "RLBayesianSolver":
         """Run IL pre-training then RWR fine-tuning."""
+        import time as _time
+        t0_total = _time.perf_counter()
+
         if not _OPTUNA_AVAILABLE:
             raise ImportError(
                 "optuna is required for RLBayesianSolver.fit() (IL teacher).  "
@@ -310,6 +313,7 @@ class RLBayesianSolver(BaseSolver):
 
         # ── Phase 1: Imitation Learning ──────────────────────────────────
         print(f"  [IL] {n_il} BayesOpt episodes × {n_bayes} trials…")
+        t0_il = _time.perf_counter()
         X_il, y_il = _generate_il_data(
             ref_ship, n_il, n_bayes, weight_min, weight_max,
             n_20ft, n_40ft, rng,
@@ -318,11 +322,18 @@ class RLBayesianSolver(BaseSolver):
         X_il_scaled = self._scaler.fit_transform(X_il)
         self._mlp.fit(X_il_scaled, y_il)
         self._fitted = True
+        il_elapsed = _time.perf_counter() - t0_il
+
+        il_loss_curve      = [round(v, 6) for v in self._mlp.loss_curve_]
+        il_val_score_curve = [round(v, 6) for v in getattr(self._mlp, "validation_scores_", [])]
+        il_best_val_score  = round(float(getattr(self._mlp, "best_validation_score_", float("nan"))), 6)
 
         # ── Phase 2: RL fine-tuning via SIR ──────────────────────────────
         print(f"  [RL] {n_rl} episodes × {n_samples} samples (SIR)…")
+        t0_rl = _time.perf_counter()
         X_rl_list: List[np.ndarray] = []
         y_rl_list: List[np.ndarray] = []
+        rl_reward_history: List[float] = []
 
         for _ in range(n_rl):
             ep_n20     = rng.randint(n_20ft, n_20ft_max) if n_20ft_max > n_20ft else n_20ft
@@ -340,6 +351,7 @@ class RLBayesianSolver(BaseSolver):
 
             # Evaluate each candidate
             rewards = np.array([_eval_weights(w, conts, ref_ship) for w in w_samples])
+            rl_reward_history.append(round(float(rewards.mean()), 6))
 
             # Softmax reward-weighting (temperature = self.beta)
             log_alpha = self.beta * (rewards - rewards.max())  # stability shift
@@ -354,6 +366,8 @@ class RLBayesianSolver(BaseSolver):
             X_rl_list.append(np.tile(feat, (n_samples, 1)))
             y_rl_list.append(w_resampled)
 
+        rl_elapsed = _time.perf_counter() - t0_rl
+
         # ── Final refit on IL + RL data ───────────────────────────────────
         if X_rl_list:
             X_rl = np.vstack(X_rl_list)
@@ -363,6 +377,24 @@ class RLBayesianSolver(BaseSolver):
             X_all_scaled = self._scaler.transform(X_all)
             self._mlp.fit(X_all_scaled, y_all)
 
+        total_elapsed = _time.perf_counter() - t0_total
+        self.training_stats_: Dict[str, Any] = {
+            "elapsed_s":           round(total_elapsed, 2),
+            "il_elapsed_s":        round(il_elapsed, 2),
+            "rl_elapsed_s":        round(rl_elapsed, 2),
+            "n_il_episodes":       n_il,
+            "n_rl_episodes":       n_rl,
+            "n_bayes_trials":      n_bayes,
+            "n_samples_per_ep":    n_samples,
+            "il_n_samples":        int(X_il.shape[0]),
+            "il_loss_curve":       il_loss_curve,
+            "il_val_score_curve":  il_val_score_curve,
+            "il_best_val_score":   il_best_val_score,
+            "rl_reward_history":   rl_reward_history,
+            "final_loss_curve":    [round(v, 6) for v in self._mlp.loss_curve_],
+            "final_val_score_curve": [round(v, 6) for v in getattr(self._mlp, "validation_scores_", [])],
+            "final_best_val_score":  round(float(getattr(self._mlp, "best_validation_score_", float("nan"))), 6),
+        }
         return self
 
     # ------------------------------------------------------------------
@@ -372,10 +404,11 @@ class RLBayesianSolver(BaseSolver):
     def save(self, path: str) -> None:
         """Save the fitted scaler + MLP to path (via joblib)."""
         joblib.dump({
-            "scaler": self._scaler,
-            "mlp":    self._mlp,
-            "sigma":  self.sigma,
-            "beta":   self.beta,
+            "scaler":         self._scaler,
+            "mlp":            self._mlp,
+            "sigma":          self.sigma,
+            "beta":           self.beta,
+            "training_stats": getattr(self, "training_stats_", {}),
         }, path)
 
     @classmethod
@@ -390,8 +423,9 @@ class RLBayesianSolver(BaseSolver):
             beta  = data.get("beta",  5.0),
             **kwargs,
         )
-        solver._scaler = data["scaler"]
-        solver._mlp    = data["mlp"]
+        solver._scaler         = data["scaler"]
+        solver._mlp            = data["mlp"]
+        solver.training_stats_ = data.get("training_stats", {})
         solver._fitted = True
         return solver
 

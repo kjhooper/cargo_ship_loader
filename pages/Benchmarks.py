@@ -25,7 +25,7 @@ RESULTS_PATH = Path(__file__).parent.parent / "benchmark_results.json"
 
 SOLVER_ORDER = [
     "greedy", "beam_search", "simulated_annealing",
-    "bayesian_opt", "neural_ranker", "rl_bayesian",
+    "bayesian_opt", "neural_ranker", "rl_bayesian", "rl_bayesian_sa",
 ]
 SOLVER_DISPLAY = {
     "greedy":              "Greedy",
@@ -34,6 +34,7 @@ SOLVER_DISPLAY = {
     "bayesian_opt":        "Bayesian Opt",
     "neural_ranker":       "Neural Ranker",
     "rl_bayesian":         "RL Bayesian",
+    "rl_bayesian_sa":      "RL Bayes + SA",
 }
 SHIP_ORDER     = ["coastal", "handymax", "panamax"]
 SCENARIO_ORDER = ["balanced", "weight_limited", "space_limited", "mixed"]
@@ -46,6 +47,7 @@ SOLVER_COLORS = {
     "bayesian_opt":        "#f87171",
     "neural_ranker":       "#a78bfa",
     "rl_bayesian":         "#fb923c",
+    "rl_bayesian_sa":      "#e879f9",
 }
 SHIP_COLORS = {"coastal": "#60a5fa", "handymax": "#34d399", "panamax": "#f59e0b"}
 
@@ -442,6 +444,160 @@ def plot_transfer_pair(
     return fig_score, fig_deg, sorted(significant, key=lambda x: x[3])
 
 
+# ── Transfer Analysis — aggregated regime charts ───────────────────────────────
+
+MODEL_VARIANT_COLORS = {
+    "coastal":  "#60a5fa",
+    "handymax": "#34d399",
+    "panamax":  "#f59e0b",
+    "avg":      "#94a3b8",
+}
+
+
+def _make_transfer_bars(
+    df_tr: pd.DataFrame,
+    x_key: str,
+    bar_key: str,
+    avg_label: str,
+    title: str,
+    x_title: str,
+) -> Optional[go.Figure]:
+    """Shared logic for ship-perspective and model-fragility charts."""
+    from plotly.subplots import make_subplots
+
+    solvers_present = [s for s in ML_SOLVERS if s in df_tr["solver_name"].values]
+    if not solvers_present:
+        return None
+
+    fig = make_subplots(
+        rows=1, cols=len(solvers_present),
+        subplot_titles=[SOLVER_DISPLAY.get(s, s) for s in solvers_present],
+        shared_yaxes=True,
+    )
+    first = True
+
+    for col_i, solver in enumerate(solvers_present, start=1):
+        sub     = _ok(df_tr[df_tr["solver_name"] == solver])
+        grouped = sub.groupby(["ship_key", "model_key"])["final_score"].mean()
+        x_vals  = [s for s in SHIP_ORDER if s in sub[x_key].unique()]
+
+        bar_variants = SHIP_ORDER + ["avg"]
+        for bar_val in bar_variants:
+            ys, texts, lines = [], [], []
+            for xv in x_vals:
+                if bar_val == "avg":
+                    kv = [
+                        grouped.get((xv, bv) if x_key == "ship_key" else (bv, xv), np.nan)
+                        for bv in SHIP_ORDER
+                    ]
+                    val = np.nanmean(kv)
+                    lines.append(dict(color="#94a3b8", width=1))
+                else:
+                    pair = (xv, bar_val) if x_key == "ship_key" else (bar_val, xv)
+                    val  = grouped.get(pair, np.nan)
+                    in_regime = (xv == bar_val)
+                    lines.append(dict(
+                        color="#facc15" if in_regime else "rgba(0,0,0,0)",
+                        width=2.5,
+                    ))
+                ys.append(val)
+                texts.append(f"{val:.3f}" if not np.isnan(val) else "N/A")
+
+            if bar_val == "avg":
+                lbl = avg_label
+            else:
+                side = "Model" if bar_key == "model_key" else "Ship"
+                lbl = f"{side}: {bar_val.capitalize()}"
+
+            fig.add_trace(go.Bar(
+                name=lbl,
+                x=[v.capitalize() for v in x_vals],
+                y=ys,
+                text=texts,
+                textposition="outside",
+                marker=dict(color=MODEL_VARIANT_COLORS[bar_val], line=lines),
+                showlegend=first,
+            ), row=1, col=col_i)
+        first = False
+        fig.update_xaxes(title_text=x_title, row=1, col=col_i)
+
+    fig.add_hline(
+        y=0.92, line_dash="dash", line_color="#f59e0b", opacity=0.7,
+        annotation_text="0.92", annotation_font_color="#f59e0b",
+    )
+    fig.update_yaxes(range=[0.82, 1.07], title_text="Final Score", col=1)
+    fig.update_layout(
+        barmode="group",
+        title=dict(text=title, font=dict(size=13)),
+        height=400,
+        margin=dict(l=60, r=20, t=80, b=55),
+        legend=dict(orientation="h", yanchor="bottom", y=1.10, font=dict(size=10)),
+        **_DARK,
+    )
+    return fig
+
+
+def plot_ship_perspective(df_tr: pd.DataFrame) -> Optional[go.Figure]:
+    """Which model works best on each ship? X = ship tested on."""
+    return _make_transfer_bars(
+        df_tr,
+        x_key="ship_key",
+        bar_key="model_key",
+        avg_label="Ship avg (any model)",
+        title="Ship Perspective — Which model works best on each ship?",
+        x_title="Ship tested on →",
+    )
+
+
+def plot_model_fragility(df_tr: pd.DataFrame) -> Optional[go.Figure]:
+    """How robust is each trained model across ship sizes? X = model trained on."""
+    return _make_transfer_bars(
+        df_tr,
+        x_key="model_key",
+        bar_key="ship_key",
+        avg_label="Model avg (any ship)",
+        title="Model Fragility — How robust is each trained model across ship sizes?",
+        x_title="Model trained on →",
+    )
+
+
+def _regime_summary_table(df_tr: pd.DataFrame) -> pd.DataFrame:
+    """Flat table: solver × ship tested × model trained, with Δ vs in-regime score."""
+    rows = []
+    for solver in ML_SOLVERS:
+        sub = _ok(df_tr[df_tr["solver_name"] == solver])
+        if sub.empty:
+            continue
+        grouped = sub.groupby(["ship_key", "model_key"])["final_score"].mean()
+        for ship in SHIP_ORDER:
+            if ship not in sub["ship_key"].unique():
+                continue
+            in_val = grouped.get((ship, ship), np.nan)
+            for model in SHIP_ORDER:
+                val = grouped.get((ship, model), np.nan)
+                delta = (val - in_val) if not (np.isnan(val) or np.isnan(in_val)) else np.nan
+                label = model + (" ★" if model == ship else "")
+                rows.append({
+                    "Solver":           SOLVER_DISPLAY.get(solver, solver),
+                    "Ship tested":      ship,
+                    "Model trained on": label,
+                    "Score":            round(val,   4) if not np.isnan(val)   else None,
+                    "Δ in-regime":      round(delta, 4) if not np.isnan(delta) else None,
+                })
+            # General-avg synthetic row
+            all_vals  = [grouped.get((ship, m), np.nan) for m in SHIP_ORDER]
+            avg_val   = np.nanmean(all_vals)
+            avg_delta = (avg_val - in_val) if not np.isnan(in_val) else np.nan
+            rows.append({
+                "Solver":           SOLVER_DISPLAY.get(solver, solver),
+                "Ship tested":      ship,
+                "Model trained on": "avg (general)",
+                "Score":            round(avg_val,   4),
+                "Δ in-regime":      round(avg_delta, 4) if not np.isnan(avg_delta) else None,
+            })
+    return pd.DataFrame(rows)
+
+
 # ── Page setup ────────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -619,12 +775,47 @@ with tab3:
                 "  so a panamax model applied to a coastal ship sees out-of-distribution ratios."
             )
 
+        st.subheader("At a Glance — Specific vs General-Model Performance")
+        st.caption(
+            "Each cluster of bars shows, for a given test ship, how each specific trained model "
+            "performs (gold border = in-regime) alongside the general-average score you'd expect "
+            "from an arbitrarily chosen model. Larger gaps between the in-regime bar and the others "
+            "indicate stronger specialisation."
+        )
+        fig_ship = plot_ship_perspective(df_tr)
+        if fig_ship is not None:
+            st.plotly_chart(fig_ship, use_container_width=True)
+
+        st.subheader("Model Fragility — Robustness Across Ship Sizes")
+        st.caption(
+            "For each trained model, shows how it performs when deployed to every ship size. "
+            "A fragile model has a high in-regime bar (gold border) but much lower bars elsewhere. "
+            "A robust model keeps all bars close together near the in-regime score."
+        )
+        fig_frag = plot_model_fragility(df_tr)
+        if fig_frag is not None:
+            st.plotly_chart(fig_frag, use_container_width=True)
+
+        st.subheader("Full Transfer Results Table")
+        regime_df = _regime_summary_table(df_tr)
+        if not regime_df.empty:
+            st.dataframe(
+                regime_df.style.background_gradient(
+                    subset=["Δ in-regime"], cmap="RdYlGn_r", vmin=-0.10, vmax=0.01
+                ),
+                use_container_width=True,
+            )
+        else:
+            st.caption("No transfer data available for regime table.")
+
+        st.divider()
+
         for solver in ML_SOLVERS:
             if df_tr.empty or solver not in df_tr["solver_name"].values:
                 st.caption(f"No transfer data for **{SOLVER_DISPLAY.get(solver, solver)}**.")
                 continue
 
-            st.subheader(f"🤖 {SOLVER_DISPLAY.get(solver, solver)}")
+            st.subheader(f"🤖 {SOLVER_DISPLAY.get(solver, solver)} — Score & Degradation Maps")
 
             fig_sc, fig_deg, significant = plot_transfer_pair(df_tr, solver)
             if fig_sc is None:
@@ -647,14 +838,22 @@ with tab3:
                 )
 
             if significant:
-                items = "\n".join(
-                    f"- **{ship}** ship ← **{model}** model: "
-                    f"score = {s:.3f}  (Δ {d:+.3f})"
-                    for ship, model, s, d in significant
-                )
-                st.warning(
-                    f"**Out-of-speciality cases** (Δ < −0.03):\n\n{items}"
-                )
+                severe   = [(s, m, sc, d) for s, m, sc, d in significant if d < -0.05]
+                moderate = [(s, m, sc, d) for s, m, sc, d in significant if -0.05 <= d < -0.03]
+                if severe:
+                    items = "\n".join(
+                        f"- **{ship}** ship ← **{model}** model: "
+                        f"score = {sc:.3f}  (Δ {d:+.3f})"
+                        for ship, model, sc, d in severe
+                    )
+                    st.error(f"**Severe degradation** (Δ < −0.05):\n\n{items}")
+                if moderate:
+                    items = "\n".join(
+                        f"- **{ship}** ship ← **{model}** model: "
+                        f"score = {sc:.3f}  (Δ {d:+.3f})"
+                        for ship, model, sc, d in moderate
+                    )
+                    st.warning(f"**Out-of-speciality cases** (−0.05 ≤ Δ < −0.03):\n\n{items}")
             else:
                 st.success("No significant cross-ship degradation detected (all Δ ≥ −0.03).")
 

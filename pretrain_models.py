@@ -8,6 +8,7 @@ Training uses Beam Search (K=5) behavioural cloning.  Smaller ships
 train faster; runtime is ~2 min total for all three.
 """
 
+import json
 import time
 from pathlib import Path
 
@@ -59,15 +60,47 @@ CONFIGS = [
 ]
 
 
+def _print_stats(stats: dict) -> None:
+    """Pretty-print training_stats_ dict."""
+    if not stats:
+        return
+    print(f"    elapsed:        {stats.get('elapsed_s', '?')}s")
+    if "il_elapsed_s" in stats:
+        print(f"    IL elapsed:     {stats['il_elapsed_s']}s")
+        print(f"    RL elapsed:     {stats['rl_elapsed_s']}s")
+        il_loss = stats.get("il_loss_curve", [])
+        print(f"    IL loss:        {il_loss[0]:.4f} → {il_loss[-1]:.4f}  ({len(il_loss)} iters)")
+        il_val = stats.get("il_val_score_curve", [])
+        if il_val:
+            print(f"    IL val score:   {il_val[0]:.4f} → {il_val[-1]:.4f}  best={stats.get('il_best_val_score','?')}")
+        rl_r = stats.get("rl_reward_history", [])
+        if rl_r:
+            print(f"    RL reward:      {rl_r[0]:.4f} → {rl_r[-1]:.4f}  (mean={sum(rl_r)/len(rl_r):.4f})")
+        final_loss = stats.get("final_loss_curve", [])
+        print(f"    Final loss:     {final_loss[0]:.4f} → {final_loss[-1]:.4f}  ({len(final_loss)} iters)")
+        final_val = stats.get("final_val_score_curve", [])
+        if final_val:
+            print(f"    Final val:      best={stats.get('final_best_val_score','?')}")
+    else:
+        loss = stats.get("loss_curve", [])
+        if loss:
+            print(f"    loss:           {loss[0]:.4f} → {loss[-1]:.4f}  ({stats.get('n_iter','?')} iters)")
+        val = stats.get("val_score_curve", [])
+        if val:
+            print(f"    val score:      {val[0]:.4f} → {val[-1]:.4f}  best={stats.get('best_val_score','?')}")
+        print(f"    samples:        {stats.get('n_samples','?')}  features: {stats.get('n_features','?')}")
+
+
 def pretrain_all():
     total_t0 = time.perf_counter()
+    all_stats = {}
+
     for cfg in CONFIGS:
         out_path = MODELS_DIR / f"neural_ranker_{cfg['key']}.pkl"
         print(f"\n{'─' * 60}")
         print(f"Training: {cfg['label']}")
         print(f"  episodes={cfg['n_episodes']}  beam_width=5")
         print(f"  containers: {cfg['n_20ft']} × 20 ft  +  {cfg['n_40ft']} × 40 ft")
-        t0 = time.perf_counter()
 
         ship = CargoShip(**cfg["ship_params"])
         solver = NeuralRankerSolver(ship, max_weight=cfg["weight_max"])
@@ -84,15 +117,18 @@ def pretrain_all():
         )
         solver.save(str(out_path))
 
-        elapsed = time.perf_counter() - t0
-        print(f"  ✓ saved → {out_path}  ({elapsed:.1f}s)")
+        stats = getattr(solver, "training_stats_", {})
+        all_stats[f"neural_ranker_{cfg['key']}"] = stats
+        print(f"  ✓ saved → {out_path}  ({stats.get('elapsed_s', '?')}s)")
+        _print_stats(stats)
 
     total = time.perf_counter() - total_t0
     print(f"\n{'─' * 60}")
-    print(f"All models trained in {total:.1f}s")
+    print(f"All Neural Ranker models trained in {total:.1f}s")
     print(f"Files in {MODELS_DIR}:")
-    for f in sorted(MODELS_DIR.glob("*.pkl")):
+    for f in sorted(MODELS_DIR.glob("neural_ranker_*.pkl")):
         print(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
+    return all_stats
 
 
 RL_CONFIGS = [
@@ -143,6 +179,8 @@ RL_CONFIGS = [
 
 def pretrain_rl_bayesian():
     total_t0 = time.perf_counter()
+    all_stats = {}
+
     for cfg in RL_CONFIGS:
         out_path = MODELS_DIR / f"rl_bayesian_{cfg['key']}.pkl"
         print(f"\n{'─' * 60}")
@@ -150,7 +188,6 @@ def pretrain_rl_bayesian():
         print(f"  n_il={cfg['n_il']}  n_bayes={cfg['n_bayes']}  "
               f"n_rl={cfg['n_rl']}  n_samples={cfg['n_samples']}")
         print(f"  containers: {cfg['n_20ft']} × 20 ft  +  {cfg['n_40ft']} × 40 ft")
-        t0 = time.perf_counter()
 
         ship   = CargoShip(**cfg["ship_params"])
         solver = RLBayesianSolver(ship)
@@ -169,8 +206,10 @@ def pretrain_rl_bayesian():
         )
         solver.save(str(out_path))
 
-        elapsed = time.perf_counter() - t0
-        print(f"  ✓ saved → {out_path}  ({elapsed:.1f}s)")
+        stats = getattr(solver, "training_stats_", {})
+        all_stats[f"rl_bayesian_{cfg['key']}"] = stats
+        print(f"  ✓ saved → {out_path}  ({stats.get('elapsed_s', '?')}s)")
+        _print_stats(stats)
 
     total = time.perf_counter() - total_t0
     print(f"\n{'─' * 60}")
@@ -178,8 +217,14 @@ def pretrain_rl_bayesian():
     print(f"Files in {MODELS_DIR}:")
     for f in sorted(MODELS_DIR.glob("rl_bayesian_*.pkl")):
         print(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
+    return all_stats
 
 
 if __name__ == "__main__":
-    pretrain_all()
-    pretrain_rl_bayesian()
+    nr_stats  = pretrain_all()
+    rl_stats  = pretrain_rl_bayesian()
+
+    stats_path = MODELS_DIR / "training_stats.json"
+    with open(stats_path, "w") as fh:
+        json.dump({**nr_stats, **rl_stats}, fh, indent=2)
+    print(f"\n✓ Training stats saved → {stats_path}")
