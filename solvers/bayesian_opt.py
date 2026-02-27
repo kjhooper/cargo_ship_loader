@@ -14,7 +14,6 @@ Requires: ``pip install optuna`` (or ``conda install -c conda-forge optuna``).
 
 from __future__ import annotations
 
-import copy
 from typing import List, Dict
 
 import numpy as np

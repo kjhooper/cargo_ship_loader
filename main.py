@@ -57,7 +57,7 @@ PANAMAX_PARAMS = dict(
     max_width=13,
     height=9,
     width_step=1,
-    max_weight=50_000.0,
+    max_weight=3_000_000.0,
 )
 
 

@@ -99,6 +99,10 @@ class CargoShip(Container):
         return True
 
     def is_position_valid(self, container, bay: int, col: int, tier: int) -> bool:
+        # 0. Weight constraint — reject if adding this container would sink the ship
+        if self.total_weight + container.weight > self.max_weight:
+            return False
+
         # 1. Boundary check
         if bay + container.size > self.length:
             return False

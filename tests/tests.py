@@ -38,7 +38,7 @@ from visualizer import _ShipPanel
 
 PANAMAX = dict(
     length=36, base_width=7, max_width=13, height=9,
-    width_step=1, max_weight=50_000.0,
+    width_step=1, max_weight=3_000_000.0,
 )
 WIDTH  = PANAMAX["max_width"]   # 13
 LENGTH = PANAMAX["length"]      # 36
@@ -725,3 +725,25 @@ class TestSolverBalance:
         assert fa >= min_ratio, (
             f"NeuralRankerSolver seed={seed}: FA ratio={fa:.3f} < {min_ratio}"
         )
+
+    @pytest.mark.parametrize("seed", [42, 99])
+    def test_rl_bayesian_balance(self, seed):
+        solvers_mod = pytest.importorskip("solvers")
+        pytest.importorskip("sklearn")
+        pytest.importorskip("optuna")
+        RLBayesianSolver = solvers_mod.RLBayesianSolver
+        ship = make_ship()
+        solver = RLBayesianSolver(ship)
+        solver.fit(
+            n_il      = 15,
+            n_bayes   = 10,
+            n_rl      = 8,
+            n_samples = 5,
+            n_20ft    = 60,
+            n_40ft    = 25,
+            weight_min = 2_000.0,
+            seed       = seed,
+            ship_params = PANAMAX,
+        )
+        solver.load(_make_containers(seed))
+        self._check_balance(ship, "RLBayesianSolver", seed)

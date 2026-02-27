@@ -2,6 +2,7 @@ numpy
 matplotlib
 pillow
 pytest
+streamlit
 
 # Optional — needed for M1 (BayesianOptSolver)
 optuna

@@ -7,8 +7,9 @@ Always available
 
 Require optional dependencies
 -------------------------------
-  BayesianOptSolver   — needs ``optuna``        (M1)
-  NeuralRankerSolver  — needs ``scikit-learn``  (M2)
+  BayesianOptSolver   — needs ``optuna``                     (M1)
+  NeuralRankerSolver  — needs ``scikit-learn``               (M2)
+  RLBayesianSolver    — needs ``scikit-learn`` + ``optuna``  (M3)
   generate_training_data — data generation helper for M2
 """
 
@@ -25,10 +26,16 @@ try:
 except ImportError:
     pass
 
+try:
+    from .rl_bayesian import RLBayesianSolver
+except ImportError:
+    pass
+
 __all__ = [
     "BeamSearchSolver",
     "SimulatedAnnealingSolver",
     "BayesianOptSolver",
     "NeuralRankerSolver",
+    "RLBayesianSolver",
     "generate_training_data",
 ]
