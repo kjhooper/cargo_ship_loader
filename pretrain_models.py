@@ -97,10 +97,10 @@ def pretrain_all():
 
     for cfg in CONFIGS:
         out_path = MODELS_DIR / f"neural_ranker_{cfg['key']}.pkl"
-        print(f"\n{'─' * 60}")
-        print(f"Training: {cfg['label']}")
-        print(f"  episodes={cfg['n_episodes']}  beam_width=5")
-        print(f"  containers: {cfg['n_20ft']} × 20 ft  +  {cfg['n_40ft']} × 40 ft")
+        print(f"\n{'─' * 60}", flush=True)
+        print(f"Training: {cfg['label']}", flush=True)
+        print(f"  episodes={cfg['n_episodes']}  beam_width=5", flush=True)
+        print(f"  containers: {cfg['n_20ft']} × 20 ft  +  {cfg['n_40ft']} × 40 ft", flush=True)
 
         ship = CargoShip(**cfg["ship_params"])
         solver = NeuralRankerSolver(ship, max_weight=cfg["weight_max"])
@@ -183,11 +183,11 @@ def pretrain_rl_bayesian():
 
     for cfg in RL_CONFIGS:
         out_path = MODELS_DIR / f"rl_bayesian_{cfg['key']}.pkl"
-        print(f"\n{'─' * 60}")
-        print(f"Training: {cfg['label']}")
+        print(f"\n{'─' * 60}", flush=True)
+        print(f"Training: {cfg['label']}", flush=True)
         print(f"  n_il={cfg['n_il']}  n_bayes={cfg['n_bayes']}  "
-              f"n_rl={cfg['n_rl']}  n_samples={cfg['n_samples']}")
-        print(f"  containers: {cfg['n_20ft']} × 20 ft  +  {cfg['n_40ft']} × 40 ft")
+              f"n_rl={cfg['n_rl']}  n_samples={cfg['n_samples']}", flush=True)
+        print(f"  containers: {cfg['n_20ft']} × 20 ft  +  {cfg['n_40ft']} × 40 ft", flush=True)
 
         ship   = CargoShip(**cfg["ship_params"])
         solver = RLBayesianSolver(ship)

@@ -147,6 +147,8 @@ def generate_training_data(
     y_list: List[float]      = []
 
     for episode in range(n_episodes):
+        if episode % 10 == 0:
+            print(f"    [BeamSearch data] episode {episode}/{n_episodes}", flush=True)
         ep_seed = rng_top.randint(0, 2**31)
         rng     = random.Random(ep_seed)
 

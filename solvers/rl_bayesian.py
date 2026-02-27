@@ -191,7 +191,9 @@ def _generate_il_data(
     X_list: List[np.ndarray] = []
     y_list: List[np.ndarray] = []
 
-    for _ in range(n_il):
+    for il_ep in range(n_il):
+        if il_ep % 10 == 0:
+            print(f"    [IL data] episode {il_ep}/{n_il}", flush=True)
         ep_n20  = rng.randint(n_20ft, n_20ft_max) if n_20ft_max > n_20ft else n_20ft
         ep_n40  = rng.randint(n_40ft, n_40ft_max) if n_40ft_max > n_40ft else n_40ft
         ep_seed = rng.randint(0, 2**31)
