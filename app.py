@@ -950,7 +950,7 @@ with st.sidebar:
 
     # ── Display options ───────────────────────────────────────
     st.subheader("Display")
-    show_anim = st.toggle("Show loading animations", value=False,
+    show_anim = st.toggle("Show loading animations", value=True,
                           help="Generates a GIF per solver (~10–15 s each).")
 
     st.divider()
