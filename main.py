@@ -46,6 +46,18 @@ try:
 except ImportError:
     _NEURAL_AVAILABLE = False
 
+try:
+    from solvers import RLBayesianSolver
+    _RL_BAYESIAN_AVAILABLE = True
+except ImportError:
+    _RL_BAYESIAN_AVAILABLE = False
+
+try:
+    from solvers import RLBayesianSASolver
+    _RL_BAYESIAN_SA_AVAILABLE = True
+except ImportError:
+    _RL_BAYESIAN_SA_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -97,18 +109,20 @@ def print_manifest(manifest: list, ship: CargoShip, label: str = "") -> None:
     placed   = [e for e in manifest if e["placed"]]
     unplaced = [e for e in manifest if not e["placed"]]
 
-    col_w   = 70
+    col_w   = 74
     heading = f"CARGO MANIFEST{f'  [{label}]' if label else ''}"
     print(f"\n{'=' * col_w}")
     print(f"{heading:^{col_w}}")
     print(f"{'=' * col_w}")
-    header = f"{'ID':>4}  {'Size':>4}  {'Weight':>8}  {'Bay':>4}  {'Col':>4}  {'Tier':>4}  {'Slot':>4}"
+    header = f"{'ID':>4}  {'Size':>4}  {'Weight':>8}  {'Bay':>4}  {'Half':>4}  {'Col':>4}  {'Tier':>4}"
     print(header)
     print("-" * col_w)
     for e in placed:
+        half = e.get("half")
+        half_str = "F" if half == 0 else "B" if half == 1 else "-"
         print(
             f"{e['container_id']:>4}  {e['size']:>4}  {e['weight']:>8.1f}  "
-            f"{e['bay']:>4}  {e['col']:>4}  {e['tier']:>4}  {e['slot']:>4}"
+            f"{e['bay']:>4}  {half_str:>4}  {e['col']:>4}  {e['tier']:>4}"
         )
 
     if unplaced:
@@ -142,6 +156,7 @@ def print_manifest(manifest: list, ship: CargoShip, label: str = "") -> None:
     print(f"{'=' * col_w}\n")
 
 
+
 def _build_solver(name: str, ship: CargoShip, args: argparse.Namespace):
     """Instantiate the requested solver."""
     if name == "greedy":
@@ -170,6 +185,33 @@ def _build_solver(name: str, ship: CargoShip, args: argparse.Namespace):
         solver.fit(n_episodes=200, beam_width=5, seed=args.seed,
                    ship_params=PANAMAX_PARAMS)
         return solver
+
+    if name == "rl_bayesian":
+        if not _RL_BAYESIAN_AVAILABLE:
+            sys.exit("RLBayesianSolver requires scikit-learn and optuna")
+        from pathlib import Path
+        pkl = Path(__file__).parent / "models" / "rl_bayesian_panamax.pkl"
+        if pkl.exists():
+            print(f"  [rl_bayesian] Loading pre-trained model from {pkl.name}…")
+            solver = RLBayesianSolver.load_model(ship, str(pkl))
+        else:
+            print("  [rl_bayesian] No pre-trained model found — training from scratch (slow)…")
+            solver = RLBayesianSolver(ship)
+            solver.fit(n_il=30, n_bayes=20, n_rl=15, n_samples=10,
+                       seed=args.seed, ship_params=PANAMAX_PARAMS)
+        return solver
+
+    if name == "rl_bayesian_sa":
+        if not _RL_BAYESIAN_SA_AVAILABLE:
+            sys.exit("RLBayesianSASolver requires scikit-learn and optuna")
+        from pathlib import Path
+        pkl = Path(__file__).parent / "models" / "rl_bayesian_panamax.pkl"
+        return RLBayesianSASolver(
+            ship,
+            n_iterations=args.n_iterations,
+            seed=args.seed,
+            model_path=str(pkl) if pkl.exists() else None,
+        )
 
     sys.exit(f"Unknown solver: {name}")
 
@@ -249,7 +291,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--solver",
-        choices=["greedy", "beam_search", "simulated_annealing", "bayesian_opt", "neural_ranker"],
+        choices=["greedy", "beam_search", "simulated_annealing",
+                 "bayesian_opt", "neural_ranker", "rl_bayesian", "rl_bayesian_sa"],
         default="greedy",
         help="Solver to use (default: greedy)",
     )

@@ -56,6 +56,11 @@ class CargoShip(Container):
         self.occupied_mask = np.zeros((self.length, self.width, self.height), dtype=bool)
         self.total_weight: float = 0.0
 
+    @property
+    def n_bays(self) -> int:
+        """Number of physical 40ft bays (= length // 2)."""
+        return self.length // 2
+
     def compute_max_volume(self):
         # -1 hull cells reduce the total, giving the true valid capacity
         return self.length * self.width * self.height + int(np.sum(self.cargo_hold))

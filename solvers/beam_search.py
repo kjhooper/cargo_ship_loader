@@ -128,20 +128,22 @@ class BeamSearchSolver(BaseSolver):
         state: _BeamState,
         container: ShippingContainer,
         bay: int,
+        half,
         col: int,
         tier: int,
         step_score: float,
     ) -> _BeamState:
-        """Return a new BeamState with *container* placed at (bay, col, tier)."""
+        """Return a new BeamState with *container* placed at (bay, half, col, tier)."""
+        pos        = bay * 2 + (half if half is not None else 0)
         new_cargo  = state.cargo_hold.copy()
         new_mask   = state.occupied_mask.copy()
         w          = container.weight
         sz         = container.size
 
-        new_cargo[bay:bay + sz, col, tier] = w / sz
-        new_mask [bay:bay + sz, col, tier] = True
+        new_cargo[pos:pos + sz, col, tier] = w / sz
+        new_mask [pos:pos + sz, col, tier] = True
 
-        bay_c   = bay + (sz - 1) / 2.0
+        bay_c   = pos + (sz - 1) / 2.0
         is_fore = bay_c < self.ship.length / 2.0
         is_port = col   < self.ship.width  / 2.0
 
@@ -150,9 +152,9 @@ class BeamSearchSolver(BaseSolver):
             "size":   sz,
             "weight": w,
             "bay":    bay,
+            "half":   half,
             "col":    col,
             "tier":   tier,
-            "slot":   bay // 2,
             "placed": True,
         }
 
@@ -179,13 +181,13 @@ class BeamSearchSolver(BaseSolver):
         beams: List[_BeamState] = [self._initial_state()]
 
         for container in sorted_containers:
-            # Collect every (beam, position, step_score) triple across all beams
-            candidates: List[Tuple[_BeamState, int, int, int, float]] = []
+            # Collect every (beam, position, step_score) tuple across all beams
+            candidates: List[Tuple] = []
             for state in beams:
                 loader = self._loader_for_state(state)
-                for (bay, col, tier) in loader._enumerate_valid_positions(container):
-                    score = loader._score_position(container, bay, col, tier)
-                    candidates.append((state, bay, col, tier, score))
+                for (bay, half, col, tier) in loader._enumerate_valid_positions(container):
+                    score = loader._score_position(container, bay, half, col, tier)
+                    candidates.append((state, bay, half, col, tier, score))
 
             if not candidates:
                 # No beam can place this container — mark unplaced in all beams
@@ -194,20 +196,20 @@ class BeamSearchSolver(BaseSolver):
                         "container_id": container.container_id,
                         "size":   container.size,
                         "weight": container.weight,
-                        "bay": None, "col": None, "tier": None,
-                        "slot": None, "placed": False,
+                        "bay": None, "half": None, "col": None, "tier": None,
+                        "placed": False,
                     })
                 continue
 
             # Keep top-K by (cumulative_score + step_score)
             candidates.sort(
-                key=lambda c: c[0].cumulative_score + c[4], reverse=True
+                key=lambda c: c[0].cumulative_score + c[5], reverse=True
             )
             top_k = candidates[: self.beam_width]
 
             beams = [
-                self._expand(state, container, bay, col, tier, score)
-                for state, bay, col, tier, score in top_k
+                self._expand(state, container, bay, half, col, tier, score)
+                for state, bay, half, col, tier, score in top_k
             ]
 
         # Pick the beam with the highest cumulative score

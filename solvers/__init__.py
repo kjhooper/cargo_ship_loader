@@ -2,14 +2,15 @@
 
 Always available
 ----------------
-  BeamSearchSolver           — Heuristic beam search (H2)
-  SimulatedAnnealingSolver   — Simulated annealing    (H3)
+  BeamSearchSolver           — Heuristic beam search           (H2)
+  SimulatedAnnealingSolver   — Simulated annealing             (H3)
 
 Require optional dependencies
 -------------------------------
-  BayesianOptSolver   — needs ``optuna``                     (M1)
-  NeuralRankerSolver  — needs ``scikit-learn``               (M2)
-  RLBayesianSolver    — needs ``scikit-learn`` + ``optuna``  (M3)
+  BayesianOptSolver      — needs ``optuna``                    (M1)
+  NeuralRankerSolver     — needs ``scikit-learn``              (M2)
+  RLBayesianSolver       — needs ``scikit-learn`` + ``optuna`` (M3)
+  RLBayesianSASolver     — needs ``scikit-learn`` + ``optuna`` (M3+H3)
   generate_training_data — data generation helper for M2
 """
 
@@ -31,11 +32,17 @@ try:
 except ImportError:
     pass
 
+try:
+    from .rl_bayesian_sa import RLBayesianSASolver
+except ImportError:
+    pass
+
 __all__ = [
     "BeamSearchSolver",
     "SimulatedAnnealingSolver",
     "BayesianOptSolver",
     "NeuralRankerSolver",
     "RLBayesianSolver",
+    "RLBayesianSASolver",
     "generate_training_data",
 ]

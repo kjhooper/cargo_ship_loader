@@ -53,6 +53,12 @@ try:
 except ImportError:
     _RL_BAYESIAN = False
 
+try:
+    from solvers.rl_bayesian_sa import RLBayesianSASolver
+    _RL_BAYESIAN_SA = True
+except ImportError:
+    _RL_BAYESIAN_SA = False
+
 MODELS_DIR = Path(__file__).parent / "models"
 
 # ── Pre-built ship configurations ────────────────────────────────────────────
@@ -154,7 +160,7 @@ def make_containers(n_20ft, n_40ft, dist_type, w_min, w_max,
 def run_solver(name: str, ship: CargoShip, containers: List[ShippingContainer],
                beam_k: int, sa_iters: int, n_trials: int,
                neural_ranker: Optional[NeuralRankerSolver],
-               rl_bayesian=None) -> Tuple[List[Dict], float]:
+               rl_bayesian=None, model_key: str = "panamax") -> Tuple[List[Dict], float]:
     t0 = time.perf_counter()
     if name == "Greedy":
         solver = CargoLoader(ship)
@@ -176,6 +182,16 @@ def run_solver(name: str, ship: CargoShip, containers: List[ShippingContainer],
         rl_bayesian.ship = ship
         rl_bayesian._fitted = True
         solver = rl_bayesian
+    elif name == "RL Bayesian + SA":
+        if not _RL_BAYESIAN_SA:
+            return [], 0.0
+        rl_pkl = MODELS_DIR / f"rl_bayesian_{model_key}.pkl"
+        solver = RLBayesianSASolver(
+            ship,
+            n_iterations=sa_iters,
+            seed=42,
+            model_path=str(rl_pkl) if rl_pkl.exists() else None,
+        )
     else:
         return [], 0.0
     manifest = solver.load(containers)
@@ -388,21 +404,24 @@ def plot_final_state(manifest: List[Dict], ship: CargoShip,
     # Invisible scatter for hover + colorbar; shapes for container visuals
     hover_x, hover_y, hover_text, norm_vals = [], [], [], []
     for e in placed:
+        pos = e["bay"] * 2 + (e.get("half") or 0)
         t = e["weight"] / max_w
         color = pc.sample_colorscale("RdBu_r", [t])[0]
         fig.add_shape(
             type="rect",
-            x0=e["bay"] + 0.06, x1=e["bay"] + e["size"] - 0.06,
+            x0=pos + 0.06, x1=pos + e["size"] - 0.06,
             y0=e["col"] + 0.08, y1=e["col"] + 0.92,
             fillcolor=color, line=dict(color="#0f172a", width=0.5),
             row=1, col=1,
         )
-        hover_x.append(e["bay"] + e["size"] / 2)
+        hover_x.append(pos + e["size"] / 2)
         hover_y.append(e["col"] + 0.5)
+        half = e.get("half")
+        half_str = "F" if half == 0 else "B" if half == 1 else "-"
         hover_text.append(
             f"Weight: {e['weight']:,.0f} kg<br>"
             f"Size: {'40 ft' if e['size'] == 2 else '20 ft'}<br>"
-            f"Bay {e['bay']}, Col {e['col']}, Tier {e.get('tier', '?')}"
+            f"Bay {e['bay']} ({half_str}), Col {e['col']}, Tier {e.get('tier', '?')}"
         )
         norm_vals.append(t)
 
@@ -525,22 +544,25 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
         c_boxes, c_cols = [], []
         hov_x, hov_y, hov_z, hov_text = [], [], [], []
         for e in placed:
+            pos   = e["bay"] * 2 + (e.get("half") or 0)
             t     = e["weight"] / max_w
             color = pc.sample_colorscale("RdBu_r", [t])[0]
             c_boxes.append((
-                e["bay"], e["bay"] + e["size"],
+                pos, pos + e["size"],
                 e["col"], e["col"] + 1,
                 e["tier"], e["tier"] + 1,
             ))
             c_cols.append(color)
-            hov_x.append(e["bay"] + e["size"] / 2)
+            hov_x.append(pos + e["size"] / 2)
             hov_y.append(e["col"] + 0.5)
             hov_z.append(e["tier"] + 0.5)
+            half = e.get("half")
+            half_str = "F" if half == 0 else "B" if half == 1 else "-"
             hov_text.append(
                 f"ID {e['container_id']} · "
                 f"{'40 ft' if e['size'] == 2 else '20 ft'}<br>"
                 f"Weight: {e['weight']:,.0f} kg<br>"
-                f"Bay {e['bay']}, Col {e['col']}, Tier {e['tier']}"
+                f"Bay {e['bay']} ({half_str}), Col {e['col']}, Tier {e['tier']}"
             )
 
         cx,cy,cz,ci,cj,ck,cfc = _batch(c_boxes, c_cols)
@@ -884,6 +906,12 @@ with st.sidebar:
         else:
             st.caption(f"⚠ No pre-trained RL Bayesian for {model_key}. Run pretrain_models.py first.")
 
+    if _RL_BAYESIAN_SA:
+        solver_options.append("RL Bayesian + SA")
+        rl_sa_pkl = MODELS_DIR / f"rl_bayesian_{model_key}.pkl"
+        if not rl_sa_pkl.exists():
+            st.caption(f"⚠ No pre-trained RL Bayesian for {model_key}. RL+SA will fall back to greedy warm start.")
+
     selected_solvers = st.multiselect(
         "Solvers to compare", solver_options,
         default=["Greedy", "Beam Search"],
@@ -894,7 +922,7 @@ with st.sidebar:
     else:
         beam_k = 5
 
-    if "Simulated Annealing" in selected_solvers:
+    if "Simulated Annealing" in selected_solvers or "RL Bayesian + SA" in selected_solvers:
         sa_iters = st.slider("SA iterations", 200, 5_000, 2_000, step=200)
     else:
         sa_iters = 2_000
@@ -911,16 +939,19 @@ with st.sidebar:
     if "RL Bayesian" in selected_solvers:
         st.caption(f"🤖 Using pre-trained RL Bayesian model: **{model_key}**")
 
+    if "RL Bayesian + SA" in selected_solvers:
+        rl_sa_pkl_info = MODELS_DIR / f"rl_bayesian_{model_key}.pkl"
+        if rl_sa_pkl_info.exists():
+            st.caption(f"🤖 RL+SA: RL Bayesian warm start (**{model_key}**) → SA refinement")
+        else:
+            st.caption(f"🤖 RL+SA: Greedy warm start → SA refinement (no **{model_key}** pkl)")
+
     st.divider()
 
     # ── Display options ───────────────────────────────────────
     st.subheader("Display")
     show_anim = st.toggle("Show loading animations", value=False,
                           help="Generates a GIF per solver (~10–15 s each).")
-    if show_anim and len(selected_solvers) == 2:
-        show_cmp = st.toggle("Show comparison animation", value=True)
-    else:
-        show_cmp = False
 
     st.divider()
     run_btn = st.button("▶  Run solvers", type="primary",
@@ -987,6 +1018,7 @@ with st.spinner(f"Running {len(selected_solvers)} solver(s)…"):
         manifest, elapsed = run_solver(
             name, ship, conts, beam_k, sa_iters, n_trials,
             neural_ranker_model, rl_bayesian=rl_bayesian_model,
+            model_key=model_key,
         )
         stats = collect_stats(manifest, ship, elapsed)
         results[name] = (manifest, ship, stats)
@@ -1027,18 +1059,6 @@ for i, (name, (manifest, ship, stats)) in enumerate(results.items()):
                 gif_bytes = make_gif(manifest, ship, label=name)
             st.image(gif_bytes, caption=f"{name} — loading sequence",
                      use_container_width=True)
-
-# ── Comparison animation ──────────────────────────────────────────────────────
-if show_cmp and len(results) == 2:
-    st.divider()
-    st.subheader("Side-by-side comparison animation")
-    names = list(results.keys())
-    m1, s1, _ = results[names[0]]
-    m2, s2, _ = results[names[1]]
-    with st.spinner("Generating comparison animation…"):
-        cmp_gif = make_comparison_gif(m1, s1, names[0], m2, s2, names[1])
-    st.image(cmp_gif, caption=f"{names[0]} vs {names[1]}",
-             use_container_width=True)
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.divider()

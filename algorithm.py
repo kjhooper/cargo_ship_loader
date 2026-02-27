@@ -75,28 +75,45 @@ class CargoLoader(BaseSolver):
 
     def _enumerate_valid_positions(
         self, container: ShippingContainer
-    ) -> List[Tuple[int, int, int]]:
-        """Return all (bay, col, tier) positions where this container fits.
+    ) -> List[Tuple]:
+        """Return all (bay, half, col, tier) positions where this container fits.
 
-        Iterates tier-major (lower tiers first), then by distance from the
-        ship's centroidal axis (central positions first).  This ensures that
-        when multiple positions score identically — as they all do on an empty
-        ship — the most central position wins the tie, producing a natural
-        centre-outward loading pattern.
+        bay  — physical bay number (0 .. n_bays-1).
+        half — 0 = fore half, 1 = aft half for 20 ft containers; None for 40 ft
+               (which always occupy the full bay).
+
+        A 40 ft container placed in bay b occupies internal positions 2b and
+        2b+1.  A 20 ft container placed at (b, half) occupies position 2b+half.
+        Neither can span across a bay boundary.
+
+        Iterates tier-major (lower tiers first), then by column distance from
+        centre, then by bay distance from centre so tie-breaking always favours
+        the most central position on an empty ship.
         """
-        center_bay = self.ship.length / 2.0
+        n_bays     = self.ship.n_bays
+        center_pos = self.ship.length / 2.0   # midpoint in 20 ft position units
         center_col = self.ship.width  / 2.0
-        bay_c_offset = (container.size - 1) / 2.0
-        bays = sorted(range(self.ship.length),
-                      key=lambda b: abs(b + bay_c_offset - center_bay))
-        cols = sorted(range(self.ship.width),
-                      key=lambda c: abs(c - center_col))
+
+        cols = sorted(range(self.ship.width),  key=lambda c: abs(c - center_col))
+        # Sort bays by the centre of the bay in position units (bay*2 + 0.5)
+        bays = sorted(range(n_bays), key=lambda b: abs(b * 2 + 0.5 - center_pos))
+
         valid = []
-        for tier in range(self.ship.height):
-            for col in cols:
-                for bay in bays:
-                    if self.ship.is_position_valid(container, bay, col, tier):
-                        valid.append((bay, col, tier))
+        if container.size == 2:  # 40 ft — occupies the full bay
+            for tier in range(self.ship.height):
+                for col in cols:
+                    for bay in bays:
+                        if self.ship.is_position_valid(container, bay * 2, col, tier):
+                            valid.append((bay, None, col, tier))
+        else:                    # 20 ft — chooses fore (0) or aft (1) half of a bay
+            for tier in range(self.ship.height):
+                for col in cols:
+                    for bay in bays:
+                        for half in (0, 1):
+                            if self.ship.is_position_valid(
+                                container, bay * 2 + half, col, tier
+                            ):
+                                valid.append((bay, half, col, tier))
         return valid
 
     # ------------------------------------------------------------------
@@ -104,9 +121,10 @@ class CargoLoader(BaseSolver):
     # ------------------------------------------------------------------
 
     def _update_moments(
-        self, container: ShippingContainer, bay: int, col: int, tier: int
+        self, container: ShippingContainer, bay: int, half, col: int, tier: int
     ) -> None:
-        bay_c = bay + (container.size - 1) / 2.0
+        pos   = bay * 2 + (half if half is not None else 0)
+        bay_c = pos + (container.size - 1) / 2.0
         w = container.weight
         self._moment_z += w * tier
         self._total_w  += w
@@ -118,31 +136,28 @@ class CargoLoader(BaseSolver):
         else:                         self._as_w += w
 
     def _two_shorts_below(self, bay: int, col: int, tier: int) -> bool:
-        """True if two distinct 20ft containers sit directly below (bay, bay+1)."""
+        """True if both halves of this bay are filled by 20ft containers below."""
         if tier == 0:
             return False
         below = tier - 1
-        at_bay: Optional[int] = None
-        at_bay_plus1: Optional[int] = None
+        fore_id: Optional[int] = None  # half == 0
+        aft_id:  Optional[int] = None  # half == 1
         for entry in self.manifest:
             if not entry["placed"]:
                 continue
             if entry["col"] == col and entry["tier"] == below and entry["size"] == 1:
-                if entry["bay"] == bay:
-                    at_bay = entry["container_id"]
-                elif entry["bay"] == bay + 1:
-                    at_bay_plus1 = entry["container_id"]
-        return (
-            at_bay is not None
-            and at_bay_plus1 is not None
-            and at_bay != at_bay_plus1
-        )
+                if entry["bay"] == bay and entry.get("half") == 0:
+                    fore_id = entry["container_id"]
+                elif entry["bay"] == bay and entry.get("half") == 1:
+                    aft_id = entry["container_id"]
+        return fore_id is not None and aft_id is not None
 
     def _score_position(
-        self, container: ShippingContainer, bay: int, col: int, tier: int
+        self, container: ShippingContainer, bay: int, half, col: int, tier: int
     ) -> float:
+        pos   = bay * 2 + (half if half is not None else 0)
         w = container.weight
-        bay_c = bay + (container.size - 1) / 2.0
+        bay_c = pos + (container.size - 1) / 2.0
         total_new = self._total_w + w
 
         # Projected quadrant weights after hypothetical placement
@@ -176,6 +191,7 @@ class CargoLoader(BaseSolver):
             score += self.k_stacking
         return score
 
+
     # ------------------------------------------------------------------
     # Main loading loop
     # ------------------------------------------------------------------
@@ -195,30 +211,31 @@ class CargoLoader(BaseSolver):
                         "size": container.size,
                         "weight": container.weight,
                         "bay": None,
+                        "half": None,
                         "col": None,
                         "tier": None,
-                        "slot": None,
                         "placed": False,
                     }
                 )
                 continue
 
-            best_bay, best_col, best_tier = max(
+            best_bay, best_half, best_col, best_tier = max(
                 valid_positions,
                 key=lambda pos: self._score_position(container, *pos),
             )
 
-            self.ship.place_container(container, best_bay, best_col, best_tier)
-            self._update_moments(container, best_bay, best_col, best_tier)
+            best_pos = best_bay * 2 + (best_half if best_half is not None else 0)
+            self.ship.place_container(container, best_pos, best_col, best_tier)
+            self._update_moments(container, best_bay, best_half, best_col, best_tier)
             self.manifest.append(
                 {
                     "container_id": container.container_id,
                     "size": container.size,
                     "weight": container.weight,
                     "bay": best_bay,
+                    "half": best_half,
                     "col": best_col,
                     "tier": best_tier,
-                    "slot": best_bay // 2,
                     "placed": True,
                 }
             )

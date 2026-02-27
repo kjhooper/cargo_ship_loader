@@ -88,8 +88,8 @@ class SimulatedAnnealingSolver(BaseSolver):
     # Position helpers
     # ------------------------------------------------------------------
 
-    def _find_top_containers(self) -> List[Tuple[int, int, int, int, int, float]]:
-        """Return (manifest_idx, bay, col, tier, size, weight) for top containers.
+    def _find_top_containers(self) -> List[Tuple]:
+        """Return (manifest_idx, bay, half, col, tier, size, weight) for top containers.
 
         A "top" container has no other container occupying any cell directly
         above it.
@@ -98,23 +98,26 @@ class SimulatedAnnealingSolver(BaseSolver):
         for i, entry in enumerate(self.manifest):
             if not entry["placed"]:
                 continue
-            bay, col, tier = entry["bay"], entry["col"], entry["tier"]
-            size, weight   = entry["size"], entry["weight"]
+            bay  = entry["bay"]
+            half = entry.get("half")
+            col  = entry["col"]
+            tier = entry["tier"]
+            size, weight = entry["size"], entry["weight"]
+            pos  = bay * 2 + (half if half is not None else 0)
             if tier + 1 < self.ship.height:
-                if np.any(self.ship.occupied_mask[bay:bay + size, col, tier + 1]):
+                if np.any(self.ship.occupied_mask[pos:pos + size, col, tier + 1]):
                     continue
-            top.append((i, bay, col, tier, size, weight))
+            top.append((i, bay, half, col, tier, size, weight))
         return top
 
     def _enumerate_valid_positions(
         self,
         size: int,
         weight: float,
-        exclude: Tuple[int, int, int],
-    ) -> List[Tuple[int, int, int]]:
-        """Enumerate valid positions for a (size, weight) container,
-        excluding *exclude* (the original position)."""
-        # Reuse CargoLoader's enumeration by creating a thin wrapper
+        exclude: Tuple,
+    ) -> List[Tuple]:
+        """Enumerate valid (bay, half, col, tier) positions for a (size, weight)
+        container, excluding *exclude* (the original position)."""
         c = _make_container(size, weight)
         loader = CargoLoader(self.ship)
         positions = loader._enumerate_valid_positions(c)
@@ -123,6 +126,81 @@ class SimulatedAnnealingSolver(BaseSolver):
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
+
+    def _run_sa_loop(self) -> List[Dict]:
+        """Run the SA perturbation loop starting from the current ship/manifest state.
+
+        Assumes self.manifest and self.ship are already populated by a warm-start
+        (greedy, RL Bayesian, or any other constructor).  Returns the best manifest
+        seen during the search and restores self.ship to that best state.
+        """
+        current_score = self.final_score()
+        best_score    = current_score
+
+        best_cargo    = self.ship.cargo_hold.copy()
+        best_mask     = self.ship.occupied_mask.copy()
+        best_weight   = self.ship.total_weight
+        best_manifest = [dict(e) for e in self.manifest]
+
+        T = self.T_start
+
+        for _ in range(self.n_iterations):
+            top = self._find_top_containers()
+            if not top:
+                break
+
+            idx, bay, half, col, tier, size, weight = self.rng.choice(top)
+            original_entry = dict(self.manifest[idx])
+            pos = bay * 2 + (half if half is not None else 0)
+
+            self._remove(pos, col, tier, size, weight)
+
+            valid = self._enumerate_valid_positions(
+                size, weight, exclude=(bay, half, col, tier)
+            )
+            if not valid:
+                self._place(pos, col, tier, size, weight)
+                T *= self.cooling
+                continue
+
+            new_bay, new_half, new_col, new_tier = self.rng.choice(valid)
+            new_pos = new_bay * 2 + (new_half if new_half is not None else 0)
+            self._place(new_pos, new_col, new_tier, size, weight)
+
+            self.manifest[idx] = {
+                "container_id": original_entry["container_id"],
+                "size":   size,
+                "weight": weight,
+                "bay":    new_bay,
+                "half":   new_half,
+                "col":    new_col,
+                "tier":   new_tier,
+                "placed": True,
+            }
+
+            new_score = self.final_score()
+            delta     = new_score - current_score
+
+            if delta > 0 or (T > 0 and self.rng.random() < math.exp(delta / T)):
+                current_score = new_score
+                if new_score > best_score:
+                    best_score    = new_score
+                    best_cargo    = self.ship.cargo_hold.copy()
+                    best_mask     = self.ship.occupied_mask.copy()
+                    best_weight   = self.ship.total_weight
+                    best_manifest = [dict(e) for e in self.manifest]
+            else:
+                self._remove(new_pos, new_col, new_tier, size, weight)
+                self._place(pos, col, tier, size, weight)
+                self.manifest[idx] = original_entry
+
+            T *= self.cooling
+
+        self.ship.cargo_hold    = best_cargo
+        self.ship.occupied_mask = best_mask
+        self.ship.total_weight  = best_weight
+        self.manifest           = best_manifest
+        return self.manifest
 
     def load(self, containers: List[ShippingContainer]) -> List[Dict]:
         # --- Step 1: greedy warm start ---
@@ -134,77 +212,8 @@ class SimulatedAnnealingSolver(BaseSolver):
         )
         self.manifest = loader.load(containers)
 
-        current_score = self.final_score()
-        best_score    = current_score
-
-        # Snapshot best state
-        best_cargo  = self.ship.cargo_hold.copy()
-        best_mask   = self.ship.occupied_mask.copy()
-        best_weight = self.ship.total_weight
-        best_manifest = [dict(e) for e in self.manifest]
-
-        T = self.T_start
-
-        # --- Step 2: SA search ---
-        for _ in range(self.n_iterations):
-            top = self._find_top_containers()
-            if not top:
-                break
-
-            idx, bay, col, tier, size, weight = self.rng.choice(top)
-            original_entry = dict(self.manifest[idx])
-
-            # Temporarily remove the container
-            self._remove(bay, col, tier, size, weight)
-
-            valid = self._enumerate_valid_positions(size, weight, exclude=(bay, col, tier))
-            if not valid:
-                # No alternative positions — restore and skip
-                self._place(bay, col, tier, size, weight)
-                T *= self.cooling
-                continue
-
-            new_bay, new_col, new_tier = self.rng.choice(valid)
-            self._place(new_bay, new_col, new_tier, size, weight)
-
-            # Update manifest entry tentatively
-            self.manifest[idx] = {
-                "container_id": original_entry["container_id"],
-                "size":   size,
-                "weight": weight,
-                "bay":    new_bay,
-                "col":    new_col,
-                "tier":   new_tier,
-                "slot":   new_bay // 2,
-                "placed": True,
-            }
-
-            new_score = self.final_score()
-            delta     = new_score - current_score
-
-            if delta > 0 or (T > 0 and self.rng.random() < math.exp(delta / T)):
-                # Accept
-                current_score = new_score
-                if new_score > best_score:
-                    best_score    = new_score
-                    best_cargo    = self.ship.cargo_hold.copy()
-                    best_mask     = self.ship.occupied_mask.copy()
-                    best_weight   = self.ship.total_weight
-                    best_manifest = [dict(e) for e in self.manifest]
-            else:
-                # Reject — undo move
-                self._remove(new_bay, new_col, new_tier, size, weight)
-                self._place(bay, col, tier, size, weight)
-                self.manifest[idx] = original_entry
-
-            T *= self.cooling
-
-        # --- Step 3: restore best state ---
-        self.ship.cargo_hold    = best_cargo
-        self.ship.occupied_mask = best_mask
-        self.ship.total_weight  = best_weight
-        self.manifest           = best_manifest
-        return self.manifest
+        # --- Steps 2 + 3: SA refinement + restore best ---
+        return self._run_sa_loop()
 
 
 # ---------------------------------------------------------------------------

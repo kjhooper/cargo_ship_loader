@@ -329,18 +329,18 @@ class TestFortyFootWeight:
 
     def test_40ft_fore_scorer_matches_balance_fn(self):
         """
-        For a 40ft container, bay_c = bay + 0.5 determines fore/aft classification.
-        From an empty ship, bay=14 (fore, bay_c=14.5) and bay=20 (aft, bay_c=20.5)
-        each place the full container weight on one side — equal imbalance magnitude
-        — so the scorer treats them identically.
+        For a 40ft container, bay_c = pos + 0.5 determines fore/aft classification.
+        Physical bay 7 (pos 14-15, fore, bay_c=14.5) and bay 10 (pos 20-21, aft,
+        bay_c=20.5) each place the full container weight on one side — equal imbalance
+        magnitude — so the scorer treats them identically.
         """
         ship = make_ship()
         loader = CargoLoader(ship)
         c = ShippingContainer(size=2, weight=20_000.0)
 
-        # Score bay=14 (spans 14-15, both fore) vs bay=20 (spans 20-21, both aft)
-        score_fore = loader._score_position(c, bay=14, col=6, tier=0)
-        score_aft  = loader._score_position(c, bay=20, col=7, tier=0)
+        # Physical bay 7 (pos 14-15, both fore) vs bay 10 (pos 20-21, both aft)
+        score_fore = loader._score_position(c, bay=7, half=None, col=6, tier=0)
+        score_aft  = loader._score_position(c, bay=10, half=None, col=7, tier=0)
 
         # Both create equal weight imbalance from an empty ship — they must tie
         assert abs(score_fore - score_aft) < 1e-6, \
@@ -378,8 +378,9 @@ class TestScorerDirection:
         loader._total_w  = 40_000.0
 
         c = ShippingContainer(size=1, weight=5_000.0)
-        score_port = loader._score_position(c, bay=10, col=5, tier=3)
-        score_stbd = loader._score_position(c, bay=10, col=9, tier=3)
+        # pos=10 = physical bay 5, half=0
+        score_port = loader._score_position(c, bay=5, half=0, col=5, tier=3)
+        score_stbd = loader._score_position(c, bay=5, half=0, col=9, tier=3)
         assert score_stbd > score_port, \
             f"port heavy: expected stbd preferred; " \
             f"port_score={score_port:.1f} stbd_score={score_stbd:.1f}"
@@ -398,8 +399,9 @@ class TestScorerDirection:
 
         c = ShippingContainer(size=1, weight=5_000.0)
         # Same col (identical PS contribution), different bay
-        score_fore = loader._score_position(c, bay=10, col=6, tier=0)
-        score_aft  = loader._score_position(c, bay=25, col=6, tier=0)
+        # pos=10 = physical bay 5, half=0;  pos=25 = physical bay 12, half=1
+        score_fore = loader._score_position(c, bay=5,  half=0, col=6, tier=0)
+        score_aft  = loader._score_position(c, bay=12, half=1, col=6, tier=0)
         assert score_aft > score_fore, \
             f"fore heavy: expected aft preferred; " \
             f"fore_score={score_fore:.1f} aft_score={score_aft:.1f}"
@@ -409,8 +411,9 @@ class TestScorerDirection:
         ship = make_ship()
         loader = CargoLoader(ship)
         c = ShippingContainer(size=1, weight=5_000.0)
-        score_t0 = loader._score_position(c, bay=5, col=6, tier=0)
-        score_t1 = loader._score_position(c, bay=5, col=6, tier=1)
+        # pos=5 = physical bay 2, half=1
+        score_t0 = loader._score_position(c, bay=2, half=1, col=6, tier=0)
+        score_t1 = loader._score_position(c, bay=2, half=1, col=6, tier=1)
         assert score_t0 > score_t1, \
             f"tier 0 should outscore tier 1; t0={score_t0:.1f} t1={score_t1:.1f}"
 
@@ -756,3 +759,16 @@ class TestSolverBalance:
         )
         solver.load(_make_coastal_containers(seed))
         self._check_balance(ship, "RLBayesianSolver", seed)
+
+    @pytest.mark.parametrize("seed", [42, 99, 7])
+    def test_rl_bayesian_sa_balance(self, seed):
+        solvers_mod = pytest.importorskip("solvers")
+        pytest.importorskip("sklearn")
+        pytest.importorskip("optuna")
+        RLBayesianSASolver = solvers_mod.RLBayesianSASolver
+        ShippingContainer.reset_id_counter()
+        # No model_path — falls back to greedy warm start + SA refinement
+        ship = CargoShip(**COASTAL)
+        solver = RLBayesianSASolver(ship, n_iterations=500, seed=seed)
+        solver.load(_make_coastal_containers(seed))
+        self._check_balance(ship, "RLBayesianSASolver(greedy warm start)", seed)

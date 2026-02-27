@@ -173,43 +173,44 @@ def generate_training_data(
             candidates = []
             for state in beams:
                 loader = solver._loader_for_state(state)
-                for (bay, col, tier) in loader._enumerate_valid_positions(container):
-                    score = loader._score_position(container, bay, col, tier)
-                    candidates.append((state, bay, col, tier, score))
+                for (bay, half, col, tier) in loader._enumerate_valid_positions(container):
+                    score = loader._score_position(container, bay, half, col, tier)
+                    candidates.append((state, bay, half, col, tier, score))
 
             if not candidates:
                 for state in beams:
                     state.manifest.append({
                         "container_id": container.container_id,
                         "size": container.size, "weight": container.weight,
-                        "bay": None, "col": None, "tier": None,
-                        "slot": None, "placed": False,
+                        "bay": None, "half": None, "col": None, "tier": None,
+                        "placed": False,
                     })
                 continue
 
             candidates.sort(
-                key=lambda c: c[0].cumulative_score + c[4], reverse=True
+                key=lambda c: c[0].cumulative_score + c[5], reverse=True
             )
             top_k = candidates[:beam_width]
 
             # Best beam's chosen position (first in top_k) = label 1
-            chosen_state, chosen_bay, chosen_col, chosen_tier, _ = top_k[0]
+            chosen_state, chosen_bay, chosen_half, chosen_col, chosen_tier, _ = top_k[0]
 
             # Extract features for ALL candidate (state, position) pairs
             seen: set = set()
-            for state, bay, col, tier, _ in candidates:
-                key = (id(state), bay, col, tier)
+            for state, bay, half, col, tier, _ in candidates:
+                key = (id(state), bay, half, col, tier)
                 if key in seen:
                     continue
                 seen.add(key)
 
+                pos = bay * 2 + (half if half is not None else 0)
                 feat = _extract_features(
                     moment_z   = state.moment_z,
                     fp_w=state.fp_w, fs_w=state.fs_w,
                     ap_w=state.ap_w, as_w=state.as_w,
                     total_w    = state.total_w,
                     container  = container,
-                    bay=bay, col=col, tier=tier,
+                    bay=pos, col=col, tier=tier,
                     ship_length = ship.length,
                     ship_width  = ship.width,
                     ship_height = ship.height,
@@ -218,6 +219,7 @@ def generate_training_data(
                 label = 1.0 if (
                     state is chosen_state
                     and bay == chosen_bay
+                    and half == chosen_half
                     and col == chosen_col
                     and tier == chosen_tier
                 ) else 0.0
@@ -227,8 +229,8 @@ def generate_training_data(
 
             # Advance beams
             beams = [
-                solver._expand(state, container, bay, col, tier, score)
-                for state, bay, col, tier, score in top_k
+                solver._expand(state, container, bay, half, col, tier, score)
+                for state, bay, half, col, tier, score in top_k
             ]
 
     X = np.stack(X_list).astype(np.float32) if X_list else np.empty((0, N_FEATURES), dtype=np.float32)
@@ -363,15 +365,16 @@ class NeuralRankerSolver(BaseSolver):
         self,
         loader: CargoLoader,
         container: ShippingContainer,
-        bay: int, col: int, tier: int,
+        bay: int, half, col: int, tier: int,
     ) -> float:
+        pos = bay * 2 + (half if half is not None else 0)
         feat = _extract_features(
             moment_z    = loader._moment_z,
             fp_w=loader._fp_w, fs_w=loader._fs_w,
             ap_w=loader._ap_w, as_w=loader._as_w,
             total_w     = loader._total_w,
             container   = container,
-            bay=bay, col=col, tier=tier,
+            bay=pos, col=col, tier=tier,
             ship_length = self.ship.length,
             ship_width  = self.ship.width,
             ship_height = self.ship.height,
@@ -404,26 +407,27 @@ class NeuralRankerSolver(BaseSolver):
                     "container_id": container.container_id,
                     "size":   container.size,
                     "weight": container.weight,
-                    "bay": None, "col": None, "tier": None,
-                    "slot": None, "placed": False,
+                    "bay": None, "half": None, "col": None, "tier": None,
+                    "placed": False,
                 })
                 continue
 
-            best_bay, best_col, best_tier = max(
+            best_bay, best_half, best_col, best_tier = max(
                 valid_positions,
                 key=lambda pos: self._score_position(loader, container, *pos),
             )
 
-            self.ship.place_container(container, best_bay, best_col, best_tier)
-            loader._update_moments(container, best_bay, best_col, best_tier)
+            best_pos = best_bay * 2 + (best_half if best_half is not None else 0)
+            self.ship.place_container(container, best_pos, best_col, best_tier)
+            loader._update_moments(container, best_bay, best_half, best_col, best_tier)
             loader.manifest.append({
                 "container_id": container.container_id,
                 "size":   container.size,
                 "weight": container.weight,
                 "bay":    best_bay,
+                "half":   best_half,
                 "col":    best_col,
                 "tier":   best_tier,
-                "slot":   best_bay // 2,
                 "placed": True,
             })
 

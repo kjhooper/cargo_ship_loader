@@ -202,15 +202,17 @@ class _ShipPanel:
             return []
 
         entry = self.manifest[idx]
-        bay: int = entry["bay"]
-        col: int = entry["col"]
-        tier: int = entry["tier"]
-        size: int = entry["size"]
+        bay: int   = entry["bay"]
+        half       = entry.get("half")
+        pos: int   = bay * 2 + (half if half is not None else 0)
+        col: int   = entry["col"]
+        tier: int  = entry["tier"]
+        size: int  = entry["size"]
         weight: float = entry["weight"]
 
         # Remove existing patches for every cell this container covers.
         removed_ids: set = set()
-        for b in range(bay, bay + size):
+        for b in range(pos, pos + size):
             key = (b, col)
             p = self._cell_patch.get(key)
             t = self._cell_text.get(key)
@@ -232,7 +234,7 @@ class _ShipPanel:
         # Draw the container rectangle
         color = self.cmap(self.norm(weight))
         rect = mpatches.FancyBboxPatch(
-            (bay + 0.05, col + 0.05),
+            (pos + 0.05, col + 0.05),
             size - 0.10,
             0.90,
             boxstyle="round,pad=0.02",
@@ -247,7 +249,7 @@ class _ShipPanel:
         brightness = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
         txt_color = "white" if brightness < 0.55 else "black"
         txt = self.ax_ship.text(
-            bay + size / 2,
+            pos + size / 2,
             col + 0.5,
             f"T{tier}",
             ha="center",
@@ -258,7 +260,7 @@ class _ShipPanel:
         )
 
         # Store under each covered cell
-        for b in range(bay, bay + size):
+        for b in range(pos, pos + size):
             self._cell_patch[(b, col)] = rect
             self._cell_text[(b, col)] = txt
 
@@ -269,7 +271,7 @@ class _ShipPanel:
             self.port_w += weight
         else:
             self.stbd_w += weight
-        if bay < center_bay:
+        if pos < center_bay:
             self.fore_w += weight
         else:
             self.aft_w += weight

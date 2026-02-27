@@ -83,7 +83,7 @@ CASES = {
                      width_step=1, max_weight=800_000.0),
         "model_key": "panamax",
         "n_20ft": 60, "n_40ft": 25,
-        "w_min": 10_000, "w_max": 30_000,
+        "w_min": 5_000, "w_max": 20_000,
         "seed": 42,
         "gif_n_20ft": 20, "gif_n_40ft": 8, "gif_seed": 42,
     },
