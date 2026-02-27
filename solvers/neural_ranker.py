@@ -118,11 +118,18 @@ def generate_training_data(
     beam_width: int = 5,
     n_20ft: int     = 60,
     n_40ft: int     = 25,
+    n_20ft_max: int = 0,
+    n_40ft_max: int = 0,
     weight_min: float = 2000.0,
     weight_max: float = 28000.0,
     seed: int = 42,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Run Beam Search on *n_episodes* random manifests; collect (features, label) pairs.
+
+    Each episode's container count is sampled uniformly between n_20ft and
+    n_20ft_max (n_40ft and n_40ft_max), so the training set spans both normal
+    loads and weight-overloaded manifests where the ship's max_weight cap binds.
+    If n_20ft_max / n_40ft_max are 0 (or <= the min), the count is fixed.
 
     Labels are binary: 1 for the position chosen by the best beam at each step,
     0 for all other valid positions considered at that step.
@@ -143,12 +150,15 @@ def generate_training_data(
         ep_seed = rng_top.randint(0, 2**31)
         rng     = random.Random(ep_seed)
 
+        ep_n20 = rng_top.randint(n_20ft, n_20ft_max) if n_20ft_max > n_20ft else n_20ft
+        ep_n40 = rng_top.randint(n_40ft, n_40ft_max) if n_40ft_max > n_40ft else n_40ft
+
         ShippingContainer.reset_id_counter()
         containers = (
             [ShippingContainer(size=1, weight=round(rng.uniform(weight_min, weight_max), 1))
-             for _ in range(n_20ft)]
+             for _ in range(ep_n20)]
             + [ShippingContainer(size=2, weight=round(rng.uniform(weight_min, weight_max), 1))
-               for _ in range(n_40ft)]
+               for _ in range(ep_n40)]
         )
         rng.shuffle(containers)
 
@@ -294,6 +304,8 @@ class NeuralRankerSolver(BaseSolver):
         ship_params: Optional[Dict[str, Any]] = None,
         n_20ft: int      = 60,
         n_40ft: int      = 25,
+        n_20ft_max: int  = 0,
+        n_40ft_max: int  = 0,
         weight_min: float = 2000.0,
     ) -> "NeuralRankerSolver":
         """Generate training data via Beam Search and fit the MLP."""
@@ -313,6 +325,8 @@ class NeuralRankerSolver(BaseSolver):
             beam_width  = beam_width,
             n_20ft      = n_20ft,
             n_40ft      = n_40ft,
+            n_20ft_max  = n_20ft_max,
+            n_40ft_max  = n_40ft_max,
             weight_min  = weight_min,
             weight_max  = self.max_weight,
             seed        = seed,

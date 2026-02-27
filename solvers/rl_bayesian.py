@@ -172,8 +172,14 @@ def _generate_il_data(
     n_20ft: int,
     n_40ft: int,
     rng: random.Random,
+    n_20ft_max: int = 0,
+    n_40ft_max: int = 0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Run BayesOpt on n_il random manifests; collect (features, best_weights).
+
+    Each episode's container count is sampled uniformly between n_20ft and
+    n_20ft_max (n_40ft and n_40ft_max) so the IL teacher sees both normal and
+    weight-overloaded manifests.  Pass n_20ft_max=0 to keep counts fixed.
 
     Returns
     -------
@@ -186,8 +192,10 @@ def _generate_il_data(
     y_list: List[np.ndarray] = []
 
     for _ in range(n_il):
+        ep_n20  = rng.randint(n_20ft, n_20ft_max) if n_20ft_max > n_20ft else n_20ft
+        ep_n40  = rng.randint(n_40ft, n_40ft_max) if n_40ft_max > n_40ft else n_40ft
         ep_seed = rng.randint(0, 2**31)
-        conts   = _random_containers(n_20ft, n_40ft, weight_min, weight_max, ep_seed)
+        conts   = _random_containers(ep_n20, ep_n40, weight_min, weight_max, ep_seed)
 
         teach_ship = _fresh_ship(ref_ship)
         teacher    = BayesianOptSolver(teach_ship, n_trials=n_bayes, seed=ep_seed)
@@ -267,14 +275,16 @@ class RLBayesianSolver(BaseSolver):
 
     def fit(
         self,
-        n_il:      int   = 100,
-        n_bayes:   int   = 25,
-        n_rl:      int   = 50,
-        n_samples: int   = 10,
-        n_20ft:    int   = 60,
-        n_40ft:    int   = 25,
+        n_il:       int   = 100,
+        n_bayes:    int   = 25,
+        n_rl:       int   = 50,
+        n_samples:  int   = 10,
+        n_20ft:     int   = 60,
+        n_40ft:     int   = 25,
+        n_20ft_max: int   = 0,
+        n_40ft_max: int   = 0,
         weight_min: float = 2_000.0,
-        seed:      int   = 42,
+        seed:       int   = 42,
         ship_params: Optional[Dict[str, Any]] = None,
     ) -> "RLBayesianSolver":
         """Run IL pre-training then RWR fine-tuning."""
@@ -303,6 +313,7 @@ class RLBayesianSolver(BaseSolver):
         X_il, y_il = _generate_il_data(
             ref_ship, n_il, n_bayes, weight_min, weight_max,
             n_20ft, n_40ft, rng,
+            n_20ft_max=n_20ft_max, n_40ft_max=n_40ft_max,
         )
         X_il_scaled = self._scaler.fit_transform(X_il)
         self._mlp.fit(X_il_scaled, y_il)
@@ -314,8 +325,10 @@ class RLBayesianSolver(BaseSolver):
         y_rl_list: List[np.ndarray] = []
 
         for _ in range(n_rl):
+            ep_n20     = rng.randint(n_20ft, n_20ft_max) if n_20ft_max > n_20ft else n_20ft
+            ep_n40     = rng.randint(n_40ft, n_40ft_max) if n_40ft_max > n_40ft else n_40ft
             ep_seed    = rng.randint(0, 2**31)
-            conts      = _random_containers(n_20ft, n_40ft, weight_min, weight_max, ep_seed)
+            conts      = _random_containers(ep_n20, ep_n40, weight_min, weight_max, ep_seed)
             feat       = _compute_manifest_features(conts, ref_ship)
             feat_scaled = self._scaler.transform(feat.reshape(1, -1))
             mu         = np.clip(self._mlp.predict(feat_scaled)[0], W_MIN, W_MAX)

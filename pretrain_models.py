@@ -26,8 +26,10 @@ CONFIGS = [
         "ship_params": dict(length=12, base_width=5, max_width=9,  height=5,
                             width_step=1, max_weight=500_000.0),
         "n_episodes": 300,   # fast — small ship
-        "n_20ft":     12,
+        "n_20ft":     12,    # min containers per episode (normal load)
         "n_40ft":     4,
+        "n_20ft_max": 40,    # max containers per episode (overloaded: 40×28k=1.12M > 500k)
+        "n_40ft_max": 15,
         "weight_max": 28_000.0,
     },
     {
@@ -36,8 +38,10 @@ CONFIGS = [
         "ship_params": dict(length=24, base_width=6, max_width=11, height=7,
                             width_step=1, max_weight=1_500_000.0),
         "n_episodes": 200,
-        "n_20ft":     35,
+        "n_20ft":     35,    # min (normal load)
         "n_40ft":     12,
+        "n_20ft_max": 100,   # max (overloaded: 100×28k=2.8M > 1.5M)
+        "n_40ft_max": 40,
         "weight_max": 28_000.0,
     },
     {
@@ -46,8 +50,10 @@ CONFIGS = [
         "ship_params": dict(length=36, base_width=7, max_width=13, height=9,
                             width_step=1, max_weight=3_000_000.0),
         "n_episodes": 150,
-        "n_20ft":     60,
+        "n_20ft":     60,    # min (normal load)
         "n_40ft":     25,
+        "n_20ft_max": 180,   # max (overloaded: 180×28k=5.04M > 3M)
+        "n_40ft_max": 70,
         "weight_max": 28_000.0,
     },
 ]
@@ -72,6 +78,8 @@ def pretrain_all():
             ship_params = cfg["ship_params"],
             n_20ft      = cfg["n_20ft"],
             n_40ft      = cfg["n_40ft"],
+            n_20ft_max  = cfg.get("n_20ft_max", 0),
+            n_40ft_max  = cfg.get("n_40ft_max", 0),
             weight_min  = 2_000.0,
         )
         solver.save(str(out_path))
@@ -99,6 +107,8 @@ RL_CONFIGS = [
         "n_samples":  20,
         "n_20ft":     12,
         "n_40ft":     4,
+        "n_20ft_max": 40,
+        "n_40ft_max": 15,
     },
     {
         "key":        "handymax",
@@ -111,6 +121,8 @@ RL_CONFIGS = [
         "n_samples":  15,
         "n_20ft":     35,
         "n_40ft":     12,
+        "n_20ft_max": 100,
+        "n_40ft_max": 40,
     },
     {
         "key":        "panamax",
@@ -123,6 +135,8 @@ RL_CONFIGS = [
         "n_samples":  10,
         "n_20ft":     60,
         "n_40ft":     25,
+        "n_20ft_max": 180,
+        "n_40ft_max": 70,
     },
 ]
 
@@ -141,14 +155,16 @@ def pretrain_rl_bayesian():
         ship   = CargoShip(**cfg["ship_params"])
         solver = RLBayesianSolver(ship)
         solver.fit(
-            n_il       = cfg["n_il"],
-            n_bayes    = cfg["n_bayes"],
-            n_rl       = cfg["n_rl"],
-            n_samples  = cfg["n_samples"],
-            n_20ft     = cfg["n_20ft"],
-            n_40ft     = cfg["n_40ft"],
-            weight_min = 2_000.0,
-            seed       = 42,
+            n_il        = cfg["n_il"],
+            n_bayes     = cfg["n_bayes"],
+            n_rl        = cfg["n_rl"],
+            n_samples   = cfg["n_samples"],
+            n_20ft      = cfg["n_20ft"],
+            n_40ft      = cfg["n_40ft"],
+            n_20ft_max  = cfg.get("n_20ft_max", 0),
+            n_40ft_max  = cfg.get("n_40ft_max", 0),
+            weight_min  = 2_000.0,
+            seed        = 42,
             ship_params = cfg["ship_params"],
         )
         solver.save(str(out_path))

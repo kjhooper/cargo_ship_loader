@@ -733,7 +733,7 @@ def make_comparison_gif(m1, s1, lbl1, m2, s2, lbl2, interval_ms=200) -> bytes:
 # ── Page setup ────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Cargo Ship Loader",
+    page_title="Manifest",
     page_icon="🚢",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -757,7 +757,7 @@ st.markdown("""
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("🚢  Cargo Ship Loader")
+    st.title("🚢  Manifest")
     st.caption("Configure the ship, containers, and algorithms, then click **Run**.")
     st.divider()
 
@@ -798,25 +798,52 @@ with st.sidebar:
 
     # ── Containers ────────────────────────────────────────────
     st.subheader("Containers")
-    _cap_ship = make_ship(ship_cfg)
-    _valid_slots = int(np.sum(_cap_ship.cargo_hold >= 0))
+    _cap_ship        = make_ship(ship_cfg)
+    _valid_slots     = int(np.sum(_cap_ship.cargo_hold >= 0))
+    _sp_n20          = _valid_slots + 200          # space-limited preset: just over physical capacity
+    _slider_max_20ft = max(1000, _valid_slots + 500)
     st.caption(f"Ship capacity: ~{_valid_slots} TEU slots (20 ft equivalent)")
-    n_20ft = st.slider("20 ft containers", 0, 1000, _def20)
-    n_40ft = st.slider("40 ft containers", 0, 500, _def40)
+
+    SCENARIO_PRESETS = {
+        "Custom":            None,
+        "⚖️ Balanced":       dict(n_20ft=_def20,  n_40ft=_def40, w_min=2_000,  w_max=28_000, dist="Uniform"),
+        "🏋️ Weight-limited":  dict(n_20ft=150,    n_40ft=60,     w_min=18_000, w_max=30_000, dist="Uniform"),
+        "📦 Space-limited":   dict(n_20ft=_sp_n20, n_40ft=0,     w_min=100,    w_max=500,    dist="Uniform"),
+        "🎲 Mixed":           dict(n_20ft=200,     n_40ft=70,     w_min=500,    w_max=30_000, dist="Bimodal"),
+    }
+
+    scenario = st.selectbox("Scenario preset", list(SCENARIO_PRESETS.keys()), key="scenario")
+    preset   = SCENARIO_PRESETS[scenario]
+    if preset is not None and st.session_state.get("_last_preset") != scenario:
+        st.session_state["_last_preset"] = scenario
+        st.session_state["cnt_20ft"] = min(preset["n_20ft"], _slider_max_20ft)
+        st.session_state["cnt_40ft"] = preset["n_40ft"]
+        st.session_state["wt_dist"]  = preset["dist"]
+        st.session_state["wt_min"]   = preset["w_min"]
+        st.session_state["wt_max"]   = preset["w_max"]
+    elif preset is None:
+        st.session_state["_last_preset"] = "Custom"
+
+    n_20ft = st.slider("20 ft containers", 0, _slider_max_20ft, _def20, key="cnt_20ft")
+    n_40ft = st.slider("40 ft containers", 0, 500, _def40, key="cnt_40ft")
     if n_20ft + n_40ft == 0:
         st.warning("Add at least one container.")
 
     dist_type = st.selectbox(
         "Weight distribution",
         ["Uniform", "Normal", "Bimodal", "Heavy-biased"],
+        key="wt_dist",
     )
     if dist_type == "Normal":
         w_mean = st.slider("Mean weight (kg)", 1_000, 28_000, 14_000, step=500)
         w_std  = st.slider("Std deviation (kg)", 500, 8_000, 4_000, step=500)
-        w_min, w_max = 500, 30_000
+        w_min, w_max = 100, 30_000
     else:
-        w_min = st.slider("Min weight (kg)", 500, 20_000, 2_000, step=500)
-        w_max = st.slider("Max weight (kg)", w_min + 500, 30_000, 28_000, step=500)
+        w_min = st.slider("Min weight (kg)", 100, 20_000, 2_000, step=100, key="wt_min")
+        # Clamp stored wt_max if it's now below the new w_min floor
+        if "wt_max" in st.session_state and st.session_state["wt_max"] < w_min + 100:
+            st.session_state["wt_max"] = w_min + 100
+        w_max = st.slider("Max weight (kg)", w_min + 100, 30_000, 28_000, step=100, key="wt_max")
         w_mean = (w_min + w_max) // 2
         w_std  = (w_max - w_min) // 4
 
