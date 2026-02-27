@@ -3,6 +3,7 @@ matplotlib
 pillow
 plotly
 pytest
+pytest-xdist
 streamlit
 
 # Optional — needed for M1 (BayesianOptSolver)
