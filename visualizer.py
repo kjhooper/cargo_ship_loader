@@ -100,7 +100,11 @@ class _ShipPanel:
 
         sm = cm.ScalarMappable(cmap=self.cmap, norm=self.norm)
         sm.set_array([])
-        self.fig.colorbar(sm, ax=ax, label="Container Weight (kg)", shrink=0.8)
+        self.fig.colorbar(
+            sm, ax=ax, label="Container Weight (kg)",
+            orientation="horizontal", location="bottom",
+            shrink=0.8, pad=0.12,
+        )
 
     def _setup_balance_axes(self) -> None:
         ax = self.ax_bal
