@@ -555,7 +555,7 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
             c_cols.append(color)
             hov_x.append(pos + e["size"] / 2)
             hov_y.append(e["col"] + 0.5)
-            hov_z.append(e["tier"] + 0.5)
+            hov_z.append(e["tier"] + 1.05)  # just above container top face
             half = e.get("half")
             half_str = "F" if half == 0 else "B" if half == 1 else "-"
             hov_text.append(
@@ -573,13 +573,13 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
             hoverinfo="skip",
             lighting=dict(ambient=0.55, diffuse=0.8, specular=0.15, roughness=0.5),
         ))
-        # Invisible markers at container centres — carry hover text
+        # Near-invisible markers just above each container — carry hover text
         traces.append(go.Scatter3d(
             x=hov_x, y=hov_y, z=hov_z,
             mode="markers",
-            marker=dict(size=10, opacity=0.0),
-            text=hov_text,
-            hovertemplate="%{text}<extra></extra>",
+            marker=dict(size=8, opacity=0.01, color="white"),
+            customdata=hov_text,
+            hovertemplate="%{customdata}<extra></extra>",
             showlegend=False,
         ))
         # Dummy trace for weight colorbar
@@ -625,10 +625,12 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
     ps_r   = min(p, s) / max(p, s) if max(p, s) > 0 else 1.0
     fa_r   = min(f, a_w) / max(f, a_w) if max(f, a_w) > 0 else 1.0
 
+    max_dim = max(L, W, H)
     fig = go.Figure(data=traces)
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="#0f172a",
+        uirevision=title or "3D Loading State",  # reset camera when solver changes
         title=dict(
             text=(
                 f"{title or '3D Loading State'}<br>"
@@ -646,8 +648,13 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
             zaxis=dict(title="Tier",
                        backgroundcolor="#1e293b", gridcolor="#334155", zerolinecolor="#475569"),
             bgcolor="#1e293b",
-            aspectmode="data",
-            camera=dict(eye=dict(x=1.6, y=-1.8, z=1.2)),
+            aspectmode="manual",
+            aspectratio=dict(
+                x=L / max_dim * 2,
+                y=W / max_dim * 2,
+                z=H / max_dim * 2,
+            ),
+            camera=dict(eye=dict(x=1.8, y=-1.5, z=1.0), up=dict(x=0, y=0, z=1)),
         ),
         height=540,
         margin=dict(l=0, r=0, t=75, b=0),
