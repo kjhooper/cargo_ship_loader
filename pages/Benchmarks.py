@@ -13,6 +13,7 @@ Run benchmarks first:
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -240,13 +241,24 @@ def plot_runtime_bar(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
             x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
             y=rows["runtime_s"],
             marker_color=SHIP_COLORS.get(ship, "#aaa"),
-            text=[f"{v:.2f}s" for v in rows["runtime_s"]],
-            textposition="outside",
+            hovertemplate=(
+                f"<b>{SHIP_DISPLAY.get(ship, ship)}</b><br>"
+                "%{x}: %{y:.3g} s<extra></extra>"
+            ),
         ))
+    max_rt = sub["runtime_s"].max()
+    min_rt = sub["runtime_s"].min()
     fig.update_layout(
         barmode="group",
         title=dict(text="Mean Runtime by Solver & Ship", font=dict(size=13)),
-        yaxis=dict(title="Runtime (s)", type="log"),
+        yaxis=dict(
+            title="Runtime (s)",
+            type="log",
+            range=[math.floor(math.log10(min_rt)) - 0.2,
+                   math.ceil(math.log10(max_rt)) + 0.3],
+            tickformat=".3g",
+            gridcolor="#334155",
+        ),
         height=340, margin=dict(l=60, r=20, t=50, b=65),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         **_DARK,
@@ -347,13 +359,24 @@ def plot_case_runtime(df: pd.DataFrame, scenario: str, ships: list, solvers: lis
             x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
             y=rows["runtime_s"],
             marker_color=SHIP_COLORS.get(ship, "#aaa"),
-            text=[f"{v:.2f}s" for v in rows["runtime_s"]],
-            textposition="outside",
+            hovertemplate=(
+                f"<b>{SHIP_DISPLAY.get(ship, ship)}</b><br>"
+                "%{x}: %{y:.3g} s<extra></extra>"
+            ),
         ))
+    max_rt = sub["runtime_s"].max()
+    min_rt = sub["runtime_s"].min()
     fig.update_layout(
         barmode="group",
         title=dict(text="Runtime by Solver", font=dict(size=13)),
-        yaxis=dict(title="Runtime (s)", type="log"),
+        yaxis=dict(
+            title="Runtime (s)",
+            type="log",
+            range=[math.floor(math.log10(min_rt)) - 0.2,
+                   math.ceil(math.log10(max_rt)) + 0.3],
+            tickformat=".3g",
+            gridcolor="#334155",
+        ),
         height=340, margin=dict(l=60, r=20, t=50, b=65),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         **_DARK,
@@ -437,18 +460,30 @@ def plot_ship_runtime_by_case(df: pd.DataFrame, ship: str, solvers: list) -> go.
         sv = [s for s in SOLVER_ORDER if s in solvers and s in rows["solver_name"].values]
         rows = rows.set_index("solver_name").reindex(sv).reset_index()
         d = CASE_DEFS.get(sc, {})
+        sc_label = f"{d.get('icon', '')} {d.get('title', sc)}"
         fig.add_trace(go.Bar(
-            name=f"{d.get('icon', '')} {d.get('title', sc)}",
+            name=sc_label,
             x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
             y=rows["runtime_s"],
             marker_color=SCENARIO_COLORS.get(sc, "#aaa"),
-            text=[f"{v:.2f}s" if not pd.isna(v) else "—" for v in rows["runtime_s"]],
-            textposition="outside",
+            hovertemplate=(
+                f"<b>{sc_label}</b><br>"
+                "%{x}: %{y:.3g} s<extra></extra>"
+            ),
         ))
+    max_rt = sub["runtime_s"].max()
+    min_rt = sub["runtime_s"].min()
     fig.update_layout(
         barmode="group",
         title=dict(text=f"Runtime by Case — {SHIP_DISPLAY.get(ship, ship)}", font=dict(size=13)),
-        yaxis=dict(title="Runtime (s)", type="log"),
+        yaxis=dict(
+            title="Runtime (s)",
+            type="log",
+            range=[math.floor(math.log10(min_rt)) - 0.2,
+                   math.ceil(math.log10(max_rt)) + 0.3],
+            tickformat=".3g",
+            gridcolor="#334155",
+        ),
         height=360, margin=dict(l=60, r=20, t=50, b=65),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         **_DARK,
