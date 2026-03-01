@@ -247,7 +247,7 @@ def plot_runtime_bar(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
         if rows.empty:
             continue
         rows = rows.set_index("solver_name").reindex(
-            [s for s in SOLVER_ORDER if s in solvers and s in rows.index]
+            [s for s in SOLVER_ORDER if s in solvers and s in rows["solver_name"].values]
         ).reset_index()
         fig.add_trace(go.Bar(
             name=SHIP_DISPLAY.get(ship, ship),
@@ -328,7 +328,7 @@ def plot_case_scores(df: pd.DataFrame, scenario: str, ships: list, solvers: list
         if rows.empty:
             continue
         rows = rows.set_index("solver_name").reindex(
-            [s for s in SOLVER_ORDER if s in solvers and s in rows.index]
+            [s for s in SOLVER_ORDER if s in solvers and s in rows["solver_name"].values]
         ).reset_index()
         fig.add_trace(go.Bar(
             name=SHIP_DISPLAY.get(ship, ship),
@@ -361,7 +361,7 @@ def plot_case_runtime(df: pd.DataFrame, scenario: str, ships: list, solvers: lis
         if rows.empty:
             continue
         rows = rows.set_index("solver_name").reindex(
-            [s for s in SOLVER_ORDER if s in solvers and s in rows.index]
+            [s for s in SOLVER_ORDER if s in solvers and s in rows["solver_name"].values]
         ).reset_index()
         fig.add_trace(go.Bar(
             name=SHIP_DISPLAY.get(ship, ship),
