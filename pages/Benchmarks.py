@@ -13,7 +13,6 @@ Run benchmarks first:
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 import numpy as np
@@ -120,6 +119,20 @@ SCENARIO_COLORS = {
 }
 
 _DARK = dict(template="plotly_dark", paper_bgcolor="#0f172a", plot_bgcolor="#1e293b")
+
+# Shared legend styling helpers
+_LEG_H = dict(   # horizontal, anchored above-left of chart
+    orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+    bgcolor="rgba(30,41,59,0.92)", bordercolor="#475569", borderwidth=1,
+    font=dict(size=11, color="#e2e8f0"),
+    title_font=dict(size=10, color="#94a3b8"),
+)
+_LEG_V = dict(   # vertical, right of chart
+    orientation="v", x=1.02, xanchor="left", yanchor="middle", y=0.5,
+    bgcolor="rgba(30,41,59,0.92)", bordercolor="#475569", borderwidth=1,
+    font=dict(size=11, color="#e2e8f0"),
+    title_font=dict(size=10, color="#94a3b8"),
+)
 
 # ── Page config ────────────────────────────────────────────────────────────────
 
@@ -246,21 +259,17 @@ def plot_runtime_bar(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
                 "%{x}: %{y:.3g} s<extra></extra>"
             ),
         ))
-    max_rt = sub["runtime_s"].max()
-    min_rt = sub["runtime_s"].min()
     fig.update_layout(
         barmode="group",
         title=dict(text="Mean Runtime by Solver & Ship", font=dict(size=13)),
         yaxis=dict(
             title="Runtime (s)",
             type="log",
-            range=[math.floor(math.log10(min_rt)) - 0.2,
-                   math.ceil(math.log10(max_rt)) + 0.3],
             tickformat=".3g",
             gridcolor="#334155",
         ),
-        height=340, margin=dict(l=60, r=20, t=50, b=65),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        height=340, margin=dict(l=60, r=20, t=68, b=65),
+        legend=dict(**_LEG_H, title_text="Ship"),
         **_DARK,
     )
     return fig
@@ -299,8 +308,8 @@ def plot_score_vs_runtime(df: pd.DataFrame, ships: list, solvers: list) -> go.Fi
     fig.update_yaxes(title="Mean Final Score", range=[0.84, 1.01])
     fig.update_layout(
         title=dict(text="Quality vs Runtime Tradeoff", font=dict(size=13)),
-        height=340, margin=dict(l=60, r=20, t=50, b=55),
-        legend=dict(orientation="v", x=1.02, font=dict(size=10)),
+        height=340, margin=dict(l=60, r=150, t=50, b=55),
+        legend=dict(**_LEG_V, title_text="Solver"),
         **_DARK,
     )
     return fig
@@ -334,8 +343,8 @@ def plot_case_scores(df: pd.DataFrame, scenario: str, ships: list, solvers: list
         barmode="group",
         title=dict(text="Final Score by Solver", font=dict(size=13)),
         yaxis=dict(title="Final Score", range=[0.5, 1.08]),
-        height=340, margin=dict(l=60, r=20, t=50, b=65),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        height=340, margin=dict(l=60, r=20, t=68, b=65),
+        legend=dict(**_LEG_H, title_text="Ship"),
         **_DARK,
     )
     return fig
@@ -364,21 +373,17 @@ def plot_case_runtime(df: pd.DataFrame, scenario: str, ships: list, solvers: lis
                 "%{x}: %{y:.3g} s<extra></extra>"
             ),
         ))
-    max_rt = sub["runtime_s"].max()
-    min_rt = sub["runtime_s"].min()
     fig.update_layout(
         barmode="group",
         title=dict(text="Runtime by Solver", font=dict(size=13)),
         yaxis=dict(
             title="Runtime (s)",
             type="log",
-            range=[math.floor(math.log10(min_rt)) - 0.2,
-                   math.ceil(math.log10(max_rt)) + 0.3],
             tickformat=".3g",
             gridcolor="#334155",
         ),
-        height=340, margin=dict(l=60, r=20, t=50, b=65),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        height=340, margin=dict(l=60, r=20, t=68, b=65),
+        legend=dict(**_LEG_H, title_text="Ship"),
         **_DARK,
     )
     return fig
@@ -409,8 +414,8 @@ def plot_case_balance(df: pd.DataFrame, scenario: str, ships: list, solvers: lis
         barmode="group",
         title=dict(text="Balance Ratios (mean across selected ships & seeds)", font=dict(size=13)),
         yaxis=dict(title="Ratio", range=[0.7, 1.08]),
-        height=340, margin=dict(l=60, r=20, t=50, b=65),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        height=340, margin=dict(l=60, r=20, t=68, b=65),
+        legend=dict(**_LEG_H, title_text="Balance metric"),
         **_DARK,
     )
     return fig
@@ -442,8 +447,8 @@ def plot_ship_scores_by_case(df: pd.DataFrame, ship: str, solvers: list) -> go.F
         barmode="group",
         title=dict(text=f"Final Score by Case — {SHIP_DISPLAY.get(ship, ship)}", font=dict(size=13)),
         yaxis=dict(title="Final Score", range=[0.5, 1.08]),
-        height=360, margin=dict(l=60, r=20, t=50, b=65),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        height=360, margin=dict(l=60, r=20, t=68, b=65),
+        legend=dict(**_LEG_H, title_text="Case"),
         **_DARK,
     )
     return fig
@@ -471,21 +476,17 @@ def plot_ship_runtime_by_case(df: pd.DataFrame, ship: str, solvers: list) -> go.
                 "%{x}: %{y:.3g} s<extra></extra>"
             ),
         ))
-    max_rt = sub["runtime_s"].max()
-    min_rt = sub["runtime_s"].min()
     fig.update_layout(
         barmode="group",
         title=dict(text=f"Runtime by Case — {SHIP_DISPLAY.get(ship, ship)}", font=dict(size=13)),
         yaxis=dict(
             title="Runtime (s)",
             type="log",
-            range=[math.floor(math.log10(min_rt)) - 0.2,
-                   math.ceil(math.log10(max_rt)) + 0.3],
             tickformat=".3g",
             gridcolor="#334155",
         ),
-        height=360, margin=dict(l=60, r=20, t=50, b=65),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        height=360, margin=dict(l=60, r=20, t=68, b=65),
+        legend=dict(**_LEG_H, title_text="Case"),
         **_DARK,
     )
     return fig
@@ -638,17 +639,32 @@ def plot_flexibility_table(stats: pd.DataFrame) -> go.Figure:
 
 
 def plot_combo_heatmap(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
+    """Solver × (ship · case) heatmap.
+
+    Model provenance (verified against benchmark_results.json):
+    - ML solvers (Neural Ranker, RL Bayesian, RL Bayes+SA): each cell uses
+      the model pre-trained on that ship (model_key == ship_key, is_transfer=False).
+      The same model is applied to all 4 loading cases for that ship —
+      there is NO case-specific fine-tuning.
+    - All other solvers (Greedy, Beam Search, SA, Bayesian Opt): no
+      pre-trained model; the algorithm runs from scratch on each problem.
+    """
     sub = _filter(df, ships, solvers)
     if sub.empty:
         return go.Figure()
     sh = [s for s in SHIP_ORDER     if s in ships]
     sc = [s for s in SCENARIO_ORDER if s in sub["scenario"].unique()]
     sv = [s for s in SOLVER_ORDER   if s in solvers and s in sub["solver_name"].unique()]
+    n_cases = len(sc)
+
+    # Clearer column labels: "Coastal — ⚖️ Balanced"
     x_labels = [
-        f"{ship[:3].title()} / {CASE_DEFS.get(scenario, {}).get('icon', '')} "
-        f"{CASE_DEFS.get(scenario, {}).get('title', scenario)[:6]}"
+        f"{SHIP_DISPLAY.get(ship, ship).split('(')[0].strip()} — "
+        f"{CASE_DEFS.get(scenario, {}).get('icon', '')} "
+        f"{CASE_DEFS.get(scenario, {}).get('title', scenario)}"
         for ship in sh for scenario in sc
     ]
+
     grouped = sub.groupby(["solver_name", "ship_key", "scenario"])["final_score"].mean()
     z, text = [], []
     for solver in sv:
@@ -657,17 +673,51 @@ def plot_combo_heatmap(df: pd.DataFrame, ships: list, solvers: list) -> go.Figur
             for scenario in sc:
                 v = grouped.get((solver, ship, scenario), np.nan)
                 rz.append(v)
-                rt.append(f"{v:.3f}" if not np.isnan(v) else "—")
+                # Mark ML solver cells to signal in-speciality model
+                if solver in ("neural_ranker", "rl_bayesian", "rl_bayesian_sa"):
+                    rt.append(f"{v:.3f}*" if not np.isnan(v) else "—")
+                else:
+                    rt.append(f"{v:.3f}" if not np.isnan(v) else "—")
         z.append(rz); text.append(rt)
-    return _heatmap(
+
+    title = (
+        "Final Score — Every (Ship × Case) Combination<br>"
+        "<sub>* ML solvers: score from the model trained on that ship "
+        "(in-speciality, same model across all cases)  |  "
+        "No asterisk: stateless algorithm, no pre-trained model</sub>"
+    )
+    fig = _heatmap(
         np.array(z, dtype=float), x_labels,
         [SOLVER_DISPLAY.get(s, s) for s in sv],
-        text,
-        "Final Score — Every (Ship × Case) Combination",
-        "RdYlGn", 0.85, 1.0,
+        text, title, "RdYlGn", 0.85, 1.0,
         colorbar_title="Score",
-        height=max(300, 60 + 42 * len(sv)),
+        height=max(320, 80 + 42 * len(sv)),
     )
+
+    # Vertical dividers between ship groups
+    for i in range(1, len(sh)):
+        fig.add_shape(
+            type="line",
+            x0=i * n_cases - 0.5, x1=i * n_cases - 0.5,
+            y0=-0.5, y1=len(sv) - 0.5,
+            line=dict(color="#f59e0b", width=2),
+        )
+
+    # Ship group label annotations above the column groups
+    for i, ship in enumerate(sh):
+        mid_col = i * n_cases + (n_cases - 1) / 2
+        fig.add_annotation(
+            x=mid_col, y=len(sv) - 0.5,
+            yref="y", xref="x",
+            text=f"<b>{SHIP_DISPLAY.get(ship, ship).split('(')[0].strip()}</b>",
+            showarrow=False,
+            yshift=28,
+            font=dict(size=11, color="#94a3b8"),
+            xanchor="center",
+        )
+
+    fig.update_layout(margin=dict(l=120, r=20, t=90, b=80))
+    return fig
 
 
 def plot_radar(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
@@ -702,8 +752,8 @@ def plot_radar(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
             angularaxis=dict(gridcolor="#334155"),
             bgcolor="#1e293b",
         ),
-        height=420, margin=dict(l=60, r=60, t=60, b=40),
-        legend=dict(orientation="v", x=1.05, font=dict(size=10)),
+        height=420, margin=dict(l=60, r=160, t=60, b=40),
+        legend=dict(**_LEG_V, title_text="Solver"),
         paper_bgcolor="#0f172a", font=dict(color="#e2e8f0"),
         template="plotly_dark",
     )
@@ -720,7 +770,11 @@ def plot_runtime_vs_score_scatter(df: pd.DataFrame, ships: list, solvers: list) 
         .reset_index()
     )
     shape_map = {"coastal": "circle", "handymax": "square", "panamax": "diamond"}
+    ships_present    = [s for s in SHIP_ORDER     if s in agg["ship_key"].unique()]
+    scenarios_present = [s for s in SCENARIO_ORDER if s in agg["scenario"].unique()]
     fig = go.Figure()
+
+    # ── Data traces (one per solver) ──────────────────────────────────────────
     for solver in [s for s in SOLVER_ORDER if s in solvers]:
         rows = agg[agg["solver_name"] == solver]
         if rows.empty:
@@ -729,6 +783,8 @@ def plot_runtime_vs_score_scatter(df: pd.DataFrame, ships: list, solvers: list) 
             x=rows["rt"], y=rows["score"],
             mode="markers",
             name=SOLVER_DISPLAY.get(solver, solver),
+            legendgroup="solver",
+            legendgrouptitle=dict(text="Solver", font=dict(size=11, color="#94a3b8")),
             marker=dict(
                 size=10,
                 color=[SCENARIO_COLORS.get(sc, "#aaa") for sc in rows["scenario"]],
@@ -742,15 +798,41 @@ def plot_runtime_vs_score_scatter(df: pd.DataFrame, ships: list, solvers: list) 
             ),
             customdata=list(zip(rows["ship_key"], rows["scenario"])),
         ))
+
+    # ── Dummy traces — case colour key ────────────────────────────────────────
+    for sc in scenarios_present:
+        d = CASE_DEFS.get(sc, {})
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers",
+            name=f"{d.get('icon', '')} {d.get('title', sc)}",
+            legendgroup="case",
+            legendgrouptitle=dict(text="Case (fill colour)",
+                                  font=dict(size=11, color="#94a3b8")),
+            marker=dict(size=10, color=SCENARIO_COLORS.get(sc, "#aaa"),
+                        symbol="circle", line=dict(color="#475569", width=1)),
+            showlegend=True,
+        ))
+
+    # ── Dummy traces — ship shape key ─────────────────────────────────────────
+    for ship in ships_present:
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers",
+            name=SHIP_DISPLAY.get(ship, ship),
+            legendgroup="ship",
+            legendgrouptitle=dict(text="Ship (marker shape)",
+                                  font=dict(size=11, color="#94a3b8")),
+            marker=dict(size=10, color="#94a3b8",
+                        symbol=shape_map.get(ship, "circle"),
+                        line=dict(color="#94a3b8", width=1)),
+            showlegend=True,
+        ))
+
     fig.update_xaxes(type="log", title="Mean Runtime (s) — log scale")
     fig.update_yaxes(title="Mean Final Score", range=[0.84, 1.01])
     fig.update_layout(
-        title=dict(
-            text="Score vs Runtime — Colour=Case, Shape=Ship, Border=Solver",
-            font=dict(size=13),
-        ),
-        height=400, margin=dict(l=60, r=20, t=50, b=55),
-        legend=dict(orientation="v", x=1.02, font=dict(size=10)),
+        title=dict(text="Score vs Runtime", font=dict(size=13)),
+        height=420, margin=dict(l=60, r=200, t=50, b=55),
+        legend=dict(**_LEG_V),
         **_DARK,
     )
     return fig
@@ -1108,10 +1190,24 @@ with tab_flex:
             plot_combo_heatmap(df_std, sel_ships, sel_solvers),
             use_container_width=True,
         )
-        st.caption(
-            "Every (ship × case) combination as a separate column. "
-            "Horizontal uniform colour = consistent algorithm. "
-            "Patchy rows = performance depends on the specific condition."
+        st.info(
+            "**How to read this chart**\n\n"
+            "Each column is one (ship, case) combination; each row is one solver. "
+            "Uniform colour across a row = consistent solver. Patchy row = "
+            "performance depends on ship size or case type.\n\n"
+            "**Model provenance (verified)**\n\n"
+            "| Solver | What runs | Model trained on |\n"
+            "|--------|-----------|------------------|\n"
+            "| Neural Ranker | Pre-trained MLP | **That ship only** — one model per ship, "
+            "applied unchanged to all 4 cases |\n"
+            "| RL Bayesian | Pre-trained MLP | **That ship only** — one model per ship, "
+            "applied unchanged to all 4 cases |\n"
+            "| RL Bayes + SA | RL Bayesian warm-start → SA | Same ship-specific pkl as RL Bayesian |\n"
+            "| Greedy / Beam Search / SA / Bayesian Opt | Stateless algorithm | "
+            "No pre-trained model — runs from scratch each time |\n\n"
+            "Cells marked **\\*** are ML solver results. "
+            "The ★ (in-speciality) notation used in the Transfer tab means the same thing: "
+            "model tested on the ship it was trained for."
         )
     with col_b:
         radar = plot_radar(df_std, sel_ships, sel_solvers)
