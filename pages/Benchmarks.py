@@ -1,11 +1,13 @@
 """Benchmark Results Viewer
 
-Pre-computed comparison of all solvers, ships, and scenarios.
+Four views:
+  Overview    — all ships side-by-side, score + runtime at a glance
+  Case Level  — drill into one scenario type (with explicit case definitions)
+  Ship Level  — drill into one ship type across all cases
+  Flexibility — algorithm consistency and robustness across all conditions
 
 Run benchmarks first:
     conda run -n personal python benchmark.py
-
-Then restart the Streamlit app to see results here.
 """
 
 from __future__ import annotations
@@ -17,9 +19,10 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Constants ──────────────────────────────────────────────────────────────────
 
 RESULTS_PATH = Path(__file__).parent.parent / "benchmark_results.json"
 
@@ -36,9 +39,64 @@ SOLVER_DISPLAY = {
     "rl_bayesian":         "RL Bayesian",
     "rl_bayesian_sa":      "RL Bayes + SA",
 }
-SHIP_ORDER     = ["coastal", "handymax", "panamax"]
+SHIP_ORDER = ["coastal", "handymax", "panamax"]
+SHIP_DISPLAY = {
+    "coastal":  "Coastal  (12×9×5)",
+    "handymax": "Handymax (24×11×7)",
+    "panamax":  "Panamax  (36×13×9)",
+}
+SHIP_PROFILE = {
+    "coastal":  dict(length=12, beam=9,  height=5, keel=5, max_weight="500 t"),
+    "handymax": dict(length=24, beam=11, height=7, keel=6, max_weight="1,500 t"),
+    "panamax":  dict(length=36, beam=13, height=9, keel=7, max_weight="3,000 t"),
+}
 SCENARIO_ORDER = ["balanced", "weight_limited", "space_limited", "mixed"]
-ML_SOLVERS     = ["neural_ranker", "rl_bayesian"]
+ML_SOLVERS = ["neural_ranker", "rl_bayesian"]
+
+# ── Case definitions ────────────────────────────────────────────────────────────
+
+CASE_DEFS = {
+    "balanced": {
+        "icon": "⚖️",
+        "title": "Balanced",
+        "summary": "Moderate 20 ft + 40 ft mix, uniform weights across the full range.",
+        "tests": "Baseline quality: stability, trim, and list when no hard constraint binds.",
+        "constraint": "None — well within weight and space limits.",
+        "weights": "2,000 – 28,000 kg",
+        "mix": "20 ft + 40 ft",
+        "dist": "Uniform",
+    },
+    "weight_limited": {
+        "icon": "🏋️",
+        "title": "Weight-limited",
+        "summary": "Many heavy containers — total manifest weight greatly exceeds the ship's weight cap.",
+        "tests": "Weight management: which containers to reject and how to preserve balance while doing so.",
+        "constraint": "Weight cap — solver must leave containers ashore.",
+        "weights": "18,000 – 30,000 kg",
+        "mix": "20 ft + 40 ft (large counts)",
+        "dist": "Uniform",
+    },
+    "space_limited": {
+        "icon": "📦",
+        "title": "Space-limited",
+        "summary": "Many very light 20 ft containers — total count exceeds available hold slots.",
+        "tests": "Slot efficiency: how completely the solver fills the physical hold.",
+        "constraint": "Hold capacity — more containers than slots.",
+        "weights": "100 – 500 kg",
+        "mix": "20 ft only",
+        "dist": "Uniform",
+    },
+    "mixed": {
+        "icon": "🎲",
+        "title": "Mixed",
+        "summary": "Bimodal weight distribution with large counts of both container sizes.",
+        "tests": "Adaptability: handling unpredictable weight clusters, mirrors real-world manifests.",
+        "constraint": "Varies by ship — may hit weight or space.",
+        "weights": "500 – 30,000 kg (bimodal)",
+        "mix": "20 ft + 40 ft",
+        "dist": "Bimodal",
+    },
+}
 
 SOLVER_COLORS = {
     "greedy":              "#60a5fa",
@@ -49,7 +107,17 @@ SOLVER_COLORS = {
     "rl_bayesian":         "#fb923c",
     "rl_bayesian_sa":      "#e879f9",
 }
-SHIP_COLORS = {"coastal": "#60a5fa", "handymax": "#34d399", "panamax": "#f59e0b"}
+SHIP_COLORS = {
+    "coastal":  "#60a5fa",
+    "handymax": "#34d399",
+    "panamax":  "#f59e0b",
+}
+SCENARIO_COLORS = {
+    "balanced":      "#60a5fa",
+    "weight_limited": "#f87171",
+    "space_limited":  "#34d399",
+    "mixed":          "#f59e0b",
+}
 
 _DARK = dict(template="plotly_dark", paper_bgcolor="#0f172a", plot_bgcolor="#1e293b")
 
@@ -73,31 +141,22 @@ def _to_df(records: list) -> pd.DataFrame:
 
 
 def _ok(df: pd.DataFrame) -> pd.DataFrame:
-    """Return only non-error rows."""
     return df[df["error"].isna()].copy()
 
 
-# ── Plot helpers ───────────────────────────────────────────────────────────────
+def _filter(df: pd.DataFrame, ships: list, solvers: list) -> pd.DataFrame:
+    mask = df["ship_key"].isin(ships) & df["solver_name"].isin(solvers)
+    return _ok(df[mask])
+
+# ── Shared plot helpers ────────────────────────────────────────────────────────
 
 def _base_heatmap(
-    z: np.ndarray,
-    x: list,
-    y: list,
-    text: list,
-    title: str,
-    colorscale: str,
-    zmin: float,
-    zmax: float,
-    zmid: Optional[float] = None,
-    colorbar_title: str = "",
-    height: int = 320,
+    z, x, y, text, title, colorscale, zmin, zmax,
+    zmid=None, colorbar_title="", height=300,
 ) -> go.Figure:
     kwargs = dict(
-        z=z, x=x, y=y,
-        colorscale=colorscale,
-        zmin=zmin, zmax=zmax,
-        text=text,
-        texttemplate="%{text}",
+        z=z, x=x, y=y, colorscale=colorscale, zmin=zmin, zmax=zmax,
+        text=text, texttemplate="%{text}",
         hovertemplate="Row: %{y}<br>Col: %{x}<br>Value: %{z}<extra></extra>",
         colorbar=dict(thickness=14, len=0.85, title=dict(text=colorbar_title, side="right")),
     )
@@ -106,81 +165,104 @@ def _base_heatmap(
     fig = go.Figure(go.Heatmap(**kwargs))
     fig.update_layout(
         title=dict(text=title, font=dict(size=13)),
-        height=height,
-        margin=dict(l=100, r=20, t=55, b=55),
-        **_DARK,
+        height=height, margin=dict(l=110, r=20, t=50, b=55), **_DARK,
     )
     return fig
 
 
-def _diagonal_boxes(fig: go.Figure, keys: list, color: str = "#facc15") -> None:
-    """Overlay golden rectangles on the diagonal of a square heatmap."""
+def _diagonal_boxes(fig, keys, color="#facc15"):
     for i in range(len(keys)):
         fig.add_shape(
-            type="rect",
-            x0=i - 0.5, x1=i + 0.5,
-            y0=i - 0.5, y1=i + 0.5,
-            line=dict(color=color, width=2.5),
-            fillcolor="rgba(0,0,0,0)",
+            type="rect", x0=i - 0.5, x1=i + 0.5, y0=i - 0.5, y1=i + 0.5,
+            line=dict(color=color, width=2.5), fillcolor="rgba(0,0,0,0)",
         )
 
 
 # ── Overview plots ─────────────────────────────────────────────────────────────
 
-def plot_score_heatmap(df: pd.DataFrame, scenario: Optional[str]) -> go.Figure:
-    sub = _ok(df)
-    if scenario and scenario != "All":
-        sub = sub[sub["scenario"] == scenario]
+def plot_score_heatmap(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
+    sub = _filter(df, ships, solvers)
     grouped = sub.groupby(["solver_name", "ship_key"])["final_score"].mean()
 
-    solvers = [s for s in SOLVER_ORDER if s in grouped.index.get_level_values(0).unique()]
-    ships   = [s for s in SHIP_ORDER   if s in grouped.index.get_level_values(1).unique()]
+    sv = [s for s in SOLVER_ORDER if s in solvers and s in grouped.index.get_level_values(0).unique()]
+    sh = [s for s in SHIP_ORDER   if s in ships   and s in grouped.index.get_level_values(1).unique()]
 
     z, text = [], []
-    for solver in solvers:
+    for solver in sv:
         row_z, row_t = [], []
-        for ship in ships:
+        for ship in sh:
             val = grouped.get((solver, ship), np.nan)
             row_z.append(val)
-            row_t.append(f"{val:.3f}" if not np.isnan(val) else "N/A")
+            row_t.append(f"{val:.3f}" if not np.isnan(val) else "—")
         z.append(row_z)
         text.append(row_t)
 
-    y_labels = [SOLVER_DISPLAY.get(s, s) for s in solvers]
-    title = "Mean Final Score — " + (scenario if scenario and scenario != "All" else "All Scenarios")
+    y_labels = [SOLVER_DISPLAY.get(s, s) for s in sv]
+    x_labels = [SHIP_DISPLAY.get(s, s) for s in sh]
     return _base_heatmap(
-        np.array(z, dtype=float), ships, y_labels, text,
-        title, "RdYlGn", 0.88, 1.0, colorbar_title="Score", height=330,
+        np.array(z, dtype=float), x_labels, y_labels, text,
+        "Mean Final Score  (all cases, all seeds)", "RdYlGn", 0.88, 1.0,
+        colorbar_title="Score", height=max(280, 60 + 42 * len(sv)),
     )
 
 
-def plot_runtime_scatter(df: pd.DataFrame) -> go.Figure:
-    sub = _ok(df)
+def plot_runtime_bar(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
+    sub = _filter(df, ships, solvers)
+    agg = sub.groupby(["solver_name", "ship_key"])["runtime_s"].mean().reset_index()
+
+    fig = go.Figure()
+    for ship in [s for s in SHIP_ORDER if s in ships]:
+        rows = agg[agg["ship_key"] == ship].copy()
+        if rows.empty:
+            continue
+        rows = rows.set_index("solver_name").reindex(
+            [s for s in SOLVER_ORDER if s in solvers and s in rows.index]
+        ).reset_index()
+        fig.add_trace(go.Bar(
+            name=SHIP_DISPLAY.get(ship, ship),
+            x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
+            y=rows["runtime_s"],
+            marker_color=SHIP_COLORS.get(ship, "#aaa"),
+            text=[f"{v:.2f}s" for v in rows["runtime_s"]],
+            textposition="outside",
+            hovertemplate=f"<b>{SHIP_DISPLAY.get(ship, ship)}</b><br>%{{x}}: %{{y:.2f}} s<extra></extra>",
+        ))
+
+    fig.update_layout(
+        barmode="group",
+        title=dict(text="Mean Runtime by Solver & Ship", font=dict(size=13)),
+        yaxis=dict(title="Runtime (s)", type="log"),
+        height=340,
+        margin=dict(l=60, r=20, t=50, b=65),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        **_DARK,
+    )
+    return fig
+
+
+def plot_score_vs_runtime(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
+    sub = _filter(df, ships, solvers)
     agg = (
         sub.groupby(["solver_name", "ship_key"])
-        .agg(mean_score=("final_score", "mean"), mean_runtime=("runtime_s", "mean"))
+        .agg(score=("final_score", "mean"), runtime=("runtime_s", "mean"))
         .reset_index()
     )
 
     fig = go.Figure()
-    for solver in SOLVER_ORDER:
+    for solver in [s for s in SOLVER_ORDER if s in solvers]:
         rows = agg[agg["solver_name"] == solver]
         if rows.empty:
             continue
         fig.add_trace(go.Scatter(
-            x=rows["mean_runtime"],
-            y=rows["mean_score"],
+            x=rows["runtime"], y=rows["score"],
             mode="markers+text",
             name=SOLVER_DISPLAY.get(solver, solver),
-            text=rows["ship_key"],
-            textposition="top center",
-            textfont=dict(size=9),
-            marker=dict(size=13, color=SOLVER_COLORS.get(solver, "#aaa")),
+            text=[SHIP_DISPLAY.get(s, s)[:7] for s in rows["ship_key"]],
+            textposition="top center", textfont=dict(size=8),
+            marker=dict(size=12, color=SOLVER_COLORS.get(solver, "#aaa")),
             hovertemplate=(
                 f"<b>{SOLVER_DISPLAY.get(solver, solver)}</b><br>"
-                "Ship: %{text}<br>"
-                "Runtime: %{x:.2f} s<br>"
-                "Score: %{y:.4f}<extra></extra>"
+                "Ship: %{text}<br>Runtime: %{x:.2f} s<br>Score: %{y:.4f}<extra></extra>"
             ),
         ))
 
@@ -190,161 +272,92 @@ def plot_runtime_scatter(df: pd.DataFrame) -> go.Figure:
     fig.update_xaxes(type="log", title="Mean Runtime (s) — log scale")
     fig.update_yaxes(title="Mean Final Score", range=[0.84, 1.01])
     fig.update_layout(
-        title=dict(text="Runtime vs Quality Tradeoff", font=dict(size=13)),
-        height=330,
-        margin=dict(l=60, r=20, t=55, b=55),
+        title=dict(text="Quality vs Runtime Tradeoff", font=dict(size=13)),
+        height=340, margin=dict(l=60, r=20, t=50, b=55),
         legend=dict(orientation="v", x=1.02, font=dict(size=10)),
         **_DARK,
     )
     return fig
 
 
-def plot_placement_heatmap(df: pd.DataFrame) -> go.Figure:
-    sub = _ok(df)
-    grouped = sub.groupby(["solver_name", "scenario"])["pct_placed"].mean()
+# ── Case Level plots ───────────────────────────────────────────────────────────
 
-    solvers   = [s for s in SOLVER_ORDER   if s in grouped.index.get_level_values(0).unique()]
-    scenarios = [s for s in SCENARIO_ORDER if s in grouped.index.get_level_values(1).unique()]
-
-    z, text = [], []
-    for solver in solvers:
-        row_z, row_t = [], []
-        for sc in scenarios:
-            val = grouped.get((solver, sc), np.nan)
-            row_z.append(val)
-            row_t.append(f"{val:.0f}%" if not np.isnan(val) else "N/A")
-        z.append(row_z)
-        text.append(row_t)
-
-    y_labels = [SOLVER_DISPLAY.get(s, s) for s in solvers]
-    return _base_heatmap(
-        np.array(z, dtype=float), scenarios, y_labels, text,
-        "Placement Rate (%) by Solver & Scenario",
-        "RdYlGn", 0.0, 100.0, colorbar_title="%", height=310,
-    )
-
-
-def plot_cog_bars(df: pd.DataFrame) -> go.Figure:
-    sub = _ok(df)
-    if "cog_height_norm" not in sub.columns:
-        return go.Figure()
-    sub = sub[sub["cog_height_norm"] > 0]
-    agg = sub.groupby(["solver_name", "ship_key"])["cog_height_norm"].mean().reset_index()
-
-    fig = go.Figure()
-    for ship in SHIP_ORDER:
-        rows = agg[agg["ship_key"] == ship]
-        if rows.empty:
-            continue
-        # preserve solver order
-        rows = rows.set_index("solver_name").reindex(
-            [s for s in SOLVER_ORDER if s in rows["solver_name"].values]
-        ).reset_index()
-        fig.add_trace(go.Bar(
-            name=ship.capitalize(),
-            x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
-            y=rows["cog_height_norm"],
-            marker_color=SHIP_COLORS.get(ship, "#aaa"),
-            text=[f"{v:.3f}" for v in rows["cog_height_norm"]],
-            textposition="outside",
-            hovertemplate=f"Ship: {ship}<br>Solver: %{{x}}<br>CoG: %{{y:.3f}}<extra></extra>",
-        ))
-
-    fig.update_layout(
-        barmode="group",
-        title=dict(text="Centre-of-Gravity Height  (lower = more stable)", font=dict(size=13)),
-        yaxis=dict(title="Normalised CoG height", range=[0, None]),
-        height=320,
-        margin=dict(l=60, r=20, t=55, b=60),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        **_DARK,
-    )
-    return fig
-
-
-# ── Scenario Deep-Dive plots ───────────────────────────────────────────────────
-
-def plot_scenario_score(df: pd.DataFrame, scenario: str) -> go.Figure:
-    sub = _ok(df[df["scenario"] == scenario])
+def plot_case_scores(df: pd.DataFrame, scenario: str, ships: list, solvers: list) -> go.Figure:
+    sub = _filter(df[df["scenario"] == scenario], ships, solvers)
     agg = sub.groupby(["solver_name", "ship_key"])["final_score"].mean().reset_index()
 
     fig = go.Figure()
-    for ship in SHIP_ORDER:
-        rows = agg[agg["ship_key"] == ship]
+    for ship in [s for s in SHIP_ORDER if s in ships]:
+        rows = agg[agg["ship_key"] == ship].copy()
         if rows.empty:
             continue
         rows = rows.set_index("solver_name").reindex(
-            [s for s in SOLVER_ORDER if s in rows["solver_name"].values]
+            [s for s in SOLVER_ORDER if s in solvers and s in rows.index]
         ).reset_index()
         fig.add_trace(go.Bar(
-            name=ship, x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
+            name=SHIP_DISPLAY.get(ship, ship),
+            x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
             y=rows["final_score"],
             marker_color=SHIP_COLORS.get(ship, "#aaa"),
             text=[f"{v:.3f}" for v in rows["final_score"]],
             textposition="outside",
-            hovertemplate=f"Ship: {ship}<br>%{{x}}: %{{y:.4f}}<extra></extra>",
+            hovertemplate=f"<b>{SHIP_DISPLAY.get(ship, ship)}</b><br>%{{x}}: %{{y:.4f}}<extra></extra>",
         ))
 
     fig.add_hline(y=0.92, line_dash="dash", line_color="#f59e0b", opacity=0.7)
     fig.update_layout(
         barmode="group",
-        title=dict(text=f"Final Score — {scenario}", font=dict(size=13)),
-        yaxis=dict(title="Final Score", range=[0.5, 1.06]),
-        height=340,
-        margin=dict(l=60, r=20, t=55, b=65),
+        title=dict(text="Final Score by Solver", font=dict(size=13)),
+        yaxis=dict(title="Final Score", range=[0.5, 1.08]),
+        height=340, margin=dict(l=60, r=20, t=50, b=65),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         **_DARK,
     )
     return fig
 
 
-def plot_scenario_runtime(df: pd.DataFrame, scenario: str) -> go.Figure:
-    sub = _ok(df[df["scenario"] == scenario])
+def plot_case_runtime(df: pd.DataFrame, scenario: str, ships: list, solvers: list) -> go.Figure:
+    sub = _filter(df[df["scenario"] == scenario], ships, solvers)
     agg = sub.groupby(["solver_name", "ship_key"])["runtime_s"].mean().reset_index()
 
     fig = go.Figure()
-    for ship in SHIP_ORDER:
-        rows = agg[agg["ship_key"] == ship]
+    for ship in [s for s in SHIP_ORDER if s in ships]:
+        rows = agg[agg["ship_key"] == ship].copy()
         if rows.empty:
             continue
         rows = rows.set_index("solver_name").reindex(
-            [s for s in SOLVER_ORDER if s in rows["solver_name"].values]
+            [s for s in SOLVER_ORDER if s in solvers and s in rows.index]
         ).reset_index()
         fig.add_trace(go.Bar(
-            name=ship, x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
+            name=SHIP_DISPLAY.get(ship, ship),
+            x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
             y=rows["runtime_s"],
             marker_color=SHIP_COLORS.get(ship, "#aaa"),
             text=[f"{v:.2f}s" for v in rows["runtime_s"]],
             textposition="outside",
-            hovertemplate=f"Ship: {ship}<br>%{{x}}: %{{y:.2f}} s<extra></extra>",
+            hovertemplate=f"<b>{SHIP_DISPLAY.get(ship, ship)}</b><br>%{{x}}: %{{y:.2f}} s<extra></extra>",
         ))
 
     fig.update_layout(
         barmode="group",
-        title=dict(text=f"Mean Runtime — {scenario}", font=dict(size=13)),
+        title=dict(text="Runtime by Solver", font=dict(size=13)),
         yaxis=dict(title="Runtime (s)", type="log"),
-        height=340,
-        margin=dict(l=60, r=20, t=55, b=65),
+        height=340, margin=dict(l=60, r=20, t=50, b=65),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         **_DARK,
     )
     return fig
 
 
-def plot_balance_breakdown(df: pd.DataFrame, scenario: str) -> go.Figure:
-    """PS / FA / Diag ratios side by side for a given scenario."""
-    sub = _ok(df[df["scenario"] == scenario])
-    metrics = {
-        "PS ratio":   "ps_ratio",
-        "FA ratio":   "fa_ratio",
-        "Diag ratio": "diag_ratio",
-    }
-    colors = ["#60a5fa", "#34d399", "#a78bfa"]
-
-    agg = sub.groupby("solver_name")[list(metrics.values())].mean().reset_index()
+def plot_case_balance(df: pd.DataFrame, scenario: str, ships: list, solvers: list) -> go.Figure:
+    sub = _filter(df[df["scenario"] == scenario], ships, solvers)
+    agg = sub.groupby("solver_name")[["ps_ratio", "fa_ratio", "diag_ratio"]].mean().reset_index()
     agg = agg.set_index("solver_name").reindex(
-        [s for s in SOLVER_ORDER if s in agg["solver_name"].values]
+        [s for s in SOLVER_ORDER if s in solvers and s in agg["solver_name"].values]
     ).reset_index()
+
+    metrics = {"PS ratio": "ps_ratio", "FA ratio": "fa_ratio", "Diag ratio": "diag_ratio"}
+    colors = ["#60a5fa", "#34d399", "#a78bfa"]
 
     fig = go.Figure()
     for (label, col), color in zip(metrics.items(), colors):
@@ -361,298 +374,463 @@ def plot_balance_breakdown(df: pd.DataFrame, scenario: str) -> go.Figure:
                   annotation_text="0.92", annotation_font_color="#f59e0b")
     fig.update_layout(
         barmode="group",
-        title=dict(text=f"Balance Ratios — {scenario}  (mean across ships & seeds)", font=dict(size=13)),
-        yaxis=dict(title="Ratio", range=[0.7, 1.06]),
-        height=340,
-        margin=dict(l=60, r=20, t=55, b=65),
+        title=dict(text="Balance Ratios (mean across selected ships & seeds)", font=dict(size=13)),
+        yaxis=dict(title="Ratio", range=[0.7, 1.08]),
+        height=340, margin=dict(l=60, r=20, t=50, b=65),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         **_DARK,
     )
     return fig
 
 
-# ── Transfer Analysis plots ────────────────────────────────────────────────────
+# ── Ship Level plots ───────────────────────────────────────────────────────────
 
-def plot_transfer_pair(
-    df_tr: pd.DataFrame, solver_name: str
-) -> tuple[Optional[go.Figure], Optional[go.Figure], list[tuple]]:
-    """Return (score_heatmap, degradation_heatmap, list_of_significant_drops)."""
+def plot_ship_scores_by_case(df: pd.DataFrame, ship: str, solvers: list) -> go.Figure:
+    sub = _filter(df[df["ship_key"] == ship], [ship], solvers)
+    agg = sub.groupby(["solver_name", "scenario"])["final_score"].mean().reset_index()
+
+    fig = go.Figure()
+    for sc in [s for s in SCENARIO_ORDER if s in agg["scenario"].unique()]:
+        rows = agg[agg["scenario"] == sc].copy()
+        rows = rows.set_index("solver_name").reindex(
+            [s for s in SOLVER_ORDER if s in solvers and s in rows.index]
+        ).reset_index()
+        d = CASE_DEFS.get(sc, {})
+        fig.add_trace(go.Bar(
+            name=f"{d.get('icon', '')} {d.get('title', sc)}",
+            x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
+            y=rows["final_score"],
+            marker_color=SCENARIO_COLORS.get(sc, "#aaa"),
+            text=[f"{v:.3f}" for v in rows["final_score"]],
+            textposition="outside",
+            hovertemplate=f"<b>{sc}</b><br>%{{x}}: %{{y:.4f}}<extra></extra>",
+        ))
+
+    fig.add_hline(y=0.92, line_dash="dash", line_color="#f59e0b", opacity=0.7)
+    fig.update_layout(
+        barmode="group",
+        title=dict(text=f"Final Score by Case — {SHIP_DISPLAY.get(ship, ship)}", font=dict(size=13)),
+        yaxis=dict(title="Final Score", range=[0.5, 1.08]),
+        height=360, margin=dict(l=60, r=20, t=50, b=65),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        **_DARK,
+    )
+    return fig
+
+
+def plot_ship_runtime_by_case(df: pd.DataFrame, ship: str, solvers: list) -> go.Figure:
+    sub = _filter(df[df["ship_key"] == ship], [ship], solvers)
+    agg = sub.groupby(["solver_name", "scenario"])["runtime_s"].mean().reset_index()
+
+    fig = go.Figure()
+    for sc in [s for s in SCENARIO_ORDER if s in agg["scenario"].unique()]:
+        rows = agg[agg["scenario"] == sc].copy()
+        rows = rows.set_index("solver_name").reindex(
+            [s for s in SOLVER_ORDER if s in solvers and s in rows.index]
+        ).reset_index()
+        d = CASE_DEFS.get(sc, {})
+        fig.add_trace(go.Bar(
+            name=f"{d.get('icon', '')} {d.get('title', sc)}",
+            x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
+            y=rows["runtime_s"],
+            marker_color=SCENARIO_COLORS.get(sc, "#aaa"),
+            text=[f"{v:.2f}s" for v in rows["runtime_s"]],
+            textposition="outside",
+        ))
+
+    fig.update_layout(
+        barmode="group",
+        title=dict(text=f"Runtime by Case — {SHIP_DISPLAY.get(ship, ship)}", font=dict(size=13)),
+        yaxis=dict(title="Runtime (s)", type="log"),
+        height=360, margin=dict(l=60, r=20, t=50, b=65),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        **_DARK,
+    )
+    return fig
+
+
+def plot_ship_seed_variance(df: pd.DataFrame, ship: str, solvers: list) -> go.Figure:
+    """Error-bar chart showing min / mean / max final score across seeds per solver."""
+    sub = _filter(df[df["ship_key"] == ship], [ship], solvers)
+    agg = sub.groupby("solver_name")["final_score"].agg(
+        mean="mean", lo="min", hi="max"
+    ).reset_index()
+    agg = agg.set_index("solver_name").reindex(
+        [s for s in SOLVER_ORDER if s in solvers and s in agg["solver_name"].values]
+    ).reset_index()
+
+    x_labels = [SOLVER_DISPLAY.get(s, s) for s in agg["solver_name"]]
+    colors    = [SOLVER_COLORS.get(s, "#aaa") for s in agg["solver_name"]]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=x_labels, y=agg["mean"],
+        marker_color=colors,
+        text=[f"{v:.4f}" for v in agg["mean"]],
+        textposition="outside",
+        error_y=dict(
+            type="data",
+            symmetric=False,
+            array=list(agg["hi"] - agg["mean"]),
+            arrayminus=list(agg["mean"] - agg["lo"]),
+            color="#94a3b8",
+            thickness=2, width=6,
+        ),
+        name="Mean ± seed range",
+        hovertemplate="<b>%{x}</b><br>Mean: %{y:.4f}<extra></extra>",
+    ))
+
+    fig.add_hline(y=0.92, line_dash="dash", line_color="#f59e0b", opacity=0.7)
+    fig.update_layout(
+        title=dict(
+            text=f"Score Consistency (error bars = min/max across seeds) — {SHIP_DISPLAY.get(ship, ship)}",
+            font=dict(size=13),
+        ),
+        yaxis=dict(title="Final Score", range=[0.5, 1.08]),
+        height=340, margin=dict(l=60, r=20, t=55, b=65),
+        showlegend=False, **_DARK,
+    )
+    return fig
+
+
+def plot_ship_cog(df: pd.DataFrame, ship: str, solvers: list) -> go.Figure:
+    sub = _filter(df[df["ship_key"] == ship], [ship], solvers)
+    if "cog_height_norm" not in sub.columns:
+        return go.Figure()
+    agg = sub[sub["cog_height_norm"] > 0].groupby("solver_name")["cog_height_norm"].mean().reset_index()
+    agg = agg.set_index("solver_name").reindex(
+        [s for s in SOLVER_ORDER if s in solvers and s in agg["solver_name"].values]
+    ).reset_index()
+
+    fig = go.Figure(go.Bar(
+        x=[SOLVER_DISPLAY.get(s, s) for s in agg["solver_name"]],
+        y=agg["cog_height_norm"],
+        marker_color=[SOLVER_COLORS.get(s, "#aaa") for s in agg["solver_name"]],
+        text=[f"{v:.4f}" for v in agg["cog_height_norm"]],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>CoG: %{y:.4f}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=dict(text=f"Centre-of-Gravity Height (lower = more stable) — {SHIP_DISPLAY.get(ship, ship)}",
+                   font=dict(size=13)),
+        yaxis=dict(title="Normalised CoG height"),
+        height=310, margin=dict(l=60, r=20, t=50, b=65),
+        showlegend=False, **_DARK,
+    )
+    return fig
+
+
+# ── Flexibility plots ──────────────────────────────────────────────────────────
+
+def _flexibility_stats(df: pd.DataFrame, ships: list, solvers: list) -> pd.DataFrame:
+    sub = _filter(df, ships, solvers)
+    rows = []
+    for solver in [s for s in SOLVER_ORDER if s in solvers]:
+        vals = sub[sub["solver_name"] == solver]["final_score"].dropna()
+        rt   = sub[sub["solver_name"] == solver]["runtime_s"].dropna()
+        if vals.empty:
+            continue
+        rows.append({
+            "solver":     solver,
+            "display":    SOLVER_DISPLAY.get(solver, solver),
+            "mean":       vals.mean(),
+            "std":        vals.std(),
+            "min":        vals.min(),
+            "max":        vals.max(),
+            "range":      vals.max() - vals.min(),
+            "flex_score": vals.mean() - 2 * vals.std(),   # penalise variance
+            "mean_rt":    rt.mean() if not rt.empty else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def plot_flexibility_table_fig(stats: pd.DataFrame) -> go.Figure:
+    """Colour-coded table: one row per solver, showing consistency metrics."""
+    cols   = ["display", "mean", "std", "min", "range", "flex_score", "mean_rt"]
+    labels = ["Solver", "Mean score", "Std dev", "Worst case", "Range", "Flex score†", "Mean RT (s)"]
+
+    def fmt(col, val):
+        if pd.isna(val):
+            return "—"
+        if col in ("mean", "std", "min", "range", "flex_score"):
+            return f"{val:.4f}"
+        if col == "mean_rt":
+            return f"{val:.2f} s"
+        return str(val)
+
+    cell_vals = []
+    for col in cols:
+        cell_vals.append([fmt(col, v) for v in stats[col]])
+
+    # Colour the flex_score column green→red
+    flex_vals = stats["flex_score"].tolist()
+    fmin, fmax = min(flex_vals), max(flex_vals)
+    frange = fmax - fmin or 1.0
+    fill_colors = []
+    for col in cols:
+        if col == "flex_score":
+            colors = []
+            for v in flex_vals:
+                t = (v - fmin) / frange
+                r = int(239 - t * (239 - 52))
+                g = int(68  + t * (211 - 68))
+                b = int(68  + t * (99  - 68))
+                colors.append(f"rgba({r},{g},{b},0.35)")
+            fill_colors.append(colors)
+        else:
+            fill_colors.append(["rgba(30,41,59,0.8)"] * len(stats))
+
+    fig = go.Figure(go.Table(
+        header=dict(
+            values=[f"<b>{l}</b>" for l in labels],
+            fill_color="#334155",
+            font=dict(color="#e2e8f0", size=12),
+            align="center", height=32,
+        ),
+        cells=dict(
+            values=cell_vals,
+            fill_color=fill_colors,
+            font=dict(color="#e2e8f0", size=11),
+            align="center", height=28,
+        ),
+    ))
+    fig.update_layout(
+        title=dict(text="Flexibility Summary  († = mean − 2×std, higher is better)", font=dict(size=13)),
+        height=80 + 30 * len(stats),
+        margin=dict(l=0, r=0, t=50, b=0),
+        **{k: v for k, v in _DARK.items() if k not in ("plot_bgcolor",)},
+    )
+    return fig
+
+
+def plot_combo_heatmap(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
+    """Solver × (ship · case) heatmap — one cell per combination."""
+    sub = _filter(df, ships, solvers)
+    sh  = [s for s in SHIP_ORDER     if s in ships]
+    sc  = [s for s in SCENARIO_ORDER if s in sub["scenario"].unique()]
+    sv  = [s for s in SOLVER_ORDER   if s in solvers and s in sub["solver_name"].unique()]
+
+    x_labels = []
+    for ship in sh:
+        for scenario in sc:
+            d = CASE_DEFS.get(scenario, {})
+            x_labels.append(f"{ship[:3].title()} / {d.get('icon', '')} {d.get('title', scenario)[:6]}")
+
+    grouped = sub.groupby(["solver_name", "ship_key", "scenario"])["final_score"].mean()
+
+    z, text = [], []
+    for solver in sv:
+        row_z, row_t = [], []
+        for ship in sh:
+            for scenario in sc:
+                val = grouped.get((solver, ship, scenario), np.nan)
+                row_z.append(val)
+                row_t.append(f"{val:.3f}" if not np.isnan(val) else "—")
+        z.append(row_z)
+        text.append(row_t)
+
+    y_labels = [SOLVER_DISPLAY.get(s, s) for s in sv]
+    return _base_heatmap(
+        np.array(z, dtype=float), x_labels, y_labels, text,
+        "Final Score — Every (Ship × Case) Combination",
+        "RdYlGn", 0.85, 1.0, colorbar_title="Score",
+        height=max(300, 60 + 42 * len(sv)),
+    )
+
+
+def plot_radar(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
+    """Spider chart: solver profiles across the four case types."""
+    sub = _filter(df, ships, solvers)
+    sc_present = [s for s in SCENARIO_ORDER if s in sub["scenario"].unique()]
+    if len(sc_present) < 3:
+        return go.Figure()
+
+    labels = [f"{CASE_DEFS[s]['icon']} {CASE_DEFS[s]['title']}" for s in sc_present]
+    labels_closed = labels + [labels[0]]
+
+    fig = go.Figure()
+    for solver in [s for s in SOLVER_ORDER if s in solvers]:
+        agg = sub[sub["solver_name"] == solver].groupby("scenario")["final_score"].mean()
+        vals = [float(agg.get(sc, np.nan)) for sc in sc_present]
+        if all(np.isnan(v) for v in vals):
+            continue
+        vals_closed = vals + [vals[0]]
+        fig.add_trace(go.Scatterpolar(
+            r=vals_closed,
+            theta=labels_closed,
+            name=SOLVER_DISPLAY.get(solver, solver),
+            line=dict(color=SOLVER_COLORS.get(solver, "#aaa"), width=2),
+            fill="toself",
+            fillcolor=SOLVER_COLORS.get(solver, "#aaa"),
+            opacity=0.10,
+            hovertemplate=f"<b>{SOLVER_DISPLAY.get(solver, solver)}</b><br>%{{theta}}: %{{r:.4f}}<extra></extra>",
+        ))
+
+    fig.update_layout(
+        title=dict(text="Solver Profiles Across Case Types", font=dict(size=13)),
+        polar=dict(
+            radialaxis=dict(range=[0.80, 1.0], showticklabels=True, tickfont=dict(size=9),
+                            gridcolor="#334155"),
+            angularaxis=dict(gridcolor="#334155"),
+            bgcolor="#1e293b",
+        ),
+        height=420, margin=dict(l=60, r=60, t=60, b=40),
+        legend=dict(orientation="v", x=1.05, font=dict(size=10)),
+        paper_bgcolor="#0f172a", font=dict(color="#e2e8f0"),
+        template="plotly_dark",
+    )
+    return fig
+
+
+def plot_runtime_vs_score_scatter(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
+    """Detailed scatter: every (solver, ship, scenario) point, hover shows context."""
+    sub = _filter(df, ships, solvers)
+    agg = (
+        sub.groupby(["solver_name", "ship_key", "scenario"])
+        .agg(score=("final_score", "mean"), rt=("runtime_s", "mean"))
+        .reset_index()
+    )
+
+    fig = go.Figure()
+    for solver in [s for s in SOLVER_ORDER if s in solvers]:
+        rows = agg[agg["solver_name"] == solver]
+        if rows.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=rows["rt"], y=rows["score"],
+            mode="markers",
+            name=SOLVER_DISPLAY.get(solver, solver),
+            marker=dict(
+                size=10,
+                color=[SCENARIO_COLORS.get(s, "#aaa") for s in rows["scenario"]],
+                symbol=[SHIP_ORDER.index(s) for s in rows["ship_key"]],
+                line=dict(color=SOLVER_COLORS.get(solver, "#aaa"), width=2),
+            ),
+            customdata=list(zip(rows["ship_key"], rows["scenario"])),
+            hovertemplate=(
+                f"<b>{SOLVER_DISPLAY.get(solver, solver)}</b><br>"
+                "Ship: %{customdata[0]}<br>"
+                "Case: %{customdata[1]}<br>"
+                "Runtime: %{x:.2f} s<br>"
+                "Score: %{y:.4f}<extra></extra>"
+            ),
+        ))
+
+    fig.add_hline(y=0.92, line_dash="dash", line_color="#f59e0b", opacity=0.7,
+                  annotation_text="0.92", annotation_font_color="#f59e0b",
+                  annotation_position="bottom right")
+    fig.update_xaxes(type="log", title="Runtime (s) — log scale")
+    fig.update_yaxes(title="Final Score", range=[0.82, 1.02])
+    fig.update_layout(
+        title=dict(
+            text="Quality vs Runtime — every (ship, case) point  "
+                 "[marker colour = case, border colour = solver]",
+            font=dict(size=12),
+        ),
+        height=400, margin=dict(l=60, r=20, t=60, b=55),
+        legend=dict(orientation="v", x=1.02, font=dict(size=10)),
+        **_DARK,
+    )
+    return fig
+
+
+# ── Transfer Analysis (ML only) ────────────────────────────────────────────────
+
+def plot_transfer_pair(df_tr, solver_name):
     sub = _ok(df_tr[df_tr["solver_name"] == solver_name])
     if sub.empty:
         return None, None, []
 
     grouped = sub.groupby(["ship_key", "model_key"])["final_score"].mean()
+    ships_present = [s for s in SHIP_ORDER if s in sub["ship_key"].unique()]
+    models_present = [s for s in SHIP_ORDER if s in sub["model_key"].unique()]
 
-    # ── Score heatmap ──────────────────────────────────────────────────────────
     z, text = [], []
-    for ship in SHIP_ORDER:
+    for ship in ships_present:
         row_z, row_t = [], []
-        for model in SHIP_ORDER:
+        for model in models_present:
             val = grouped.get((ship, model), np.nan)
             row_z.append(val)
             star = " ★" if ship == model else ""
-            row_t.append(f"{val:.3f}{star}" if not np.isnan(val) else "N/A")
+            row_t.append(f"{val:.3f}{star}" if not np.isnan(val) else "—")
         z.append(row_z)
         text.append(row_t)
 
-    z_arr = np.array(z, dtype=float)
     fig_score = _base_heatmap(
-        z_arr, SHIP_ORDER, SHIP_ORDER, text,
-        f"{SOLVER_DISPLAY.get(solver_name, solver_name)} — Final Score (ship × model)",
-        "RdYlGn", 0.88, 1.0, colorbar_title="Score", height=320,
+        np.array(z, dtype=float),
+        [SHIP_DISPLAY.get(s, s) for s in models_present],
+        [SHIP_DISPLAY.get(s, s) for s in ships_present],
+        text,
+        f"{SOLVER_DISPLAY.get(solver_name, solver_name)} — Score (ship tested × model trained)",
+        "RdYlGn", 0.88, 1.0, colorbar_title="Score", height=310,
     )
     fig_score.update_xaxes(title_text="Model trained on →")
     fig_score.update_yaxes(title_text="Ship tested on →")
-    _diagonal_boxes(fig_score, SHIP_ORDER)
+    _diagonal_boxes(fig_score, ships_present)
 
-    # ── Degradation heatmap ────────────────────────────────────────────────────
-    dz, dtext = [], []
-    significant: list[tuple] = []
-    for i, ship in enumerate(SHIP_ORDER):
+    dz, dtext, significant = [], [], []
+    for i, ship in enumerate(ships_present):
         matched = grouped.get((ship, ship), np.nan)
         row_dz, row_dt = [], []
-        for j, model in enumerate(SHIP_ORDER):
+        for j, model in enumerate(models_present):
             val = grouped.get((ship, model), np.nan)
             if np.isnan(val) or np.isnan(matched):
-                row_dz.append(np.nan)
-                row_dt.append("N/A")
+                row_dz.append(np.nan); row_dt.append("—")
             else:
                 delta = val - matched
                 row_dz.append(delta)
                 row_dt.append(f"{delta:+.3f}")
                 if ship != model and delta < -0.03:
                     significant.append((ship, model, float(val), float(delta)))
-        dz.append(row_dz)
-        dtext.append(row_dt)
+        dz.append(row_dz); dtext.append(row_dt)
 
     dz_arr = np.array(dz, dtype=float)
-    dmin = float(np.nanmin(dz_arr)) if not np.all(np.isnan(dz_arr)) else -0.05
-    dmax = float(np.nanmax(dz_arr)) if not np.all(np.isnan(dz_arr)) else 0.05
-    # Symmetric scale centred on zero; widen slightly so diagonal (0) is white
-    bound = max(abs(dmin), abs(dmax), 0.02)
-
+    bound = max(abs(float(np.nanmin(dz_arr))), abs(float(np.nanmax(dz_arr))), 0.02)
     fig_deg = _base_heatmap(
-        dz_arr, SHIP_ORDER, SHIP_ORDER, dtext,
-        f"{SOLVER_DISPLAY.get(solver_name, solver_name)} — Score Δ vs. Matched (diagonal)",
+        dz_arr,
+        [SHIP_DISPLAY.get(s, s) for s in models_present],
+        [SHIP_DISPLAY.get(s, s) for s in ships_present],
+        dtext,
+        f"{SOLVER_DISPLAY.get(solver_name, solver_name)} — Score Δ vs. in-speciality diagonal",
         "RdBu", zmin=-bound, zmax=bound, zmid=0.0,
-        colorbar_title="Δ Score", height=320,
+        colorbar_title="Δ Score", height=310,
     )
     fig_deg.update_xaxes(title_text="Model trained on →")
     fig_deg.update_yaxes(title_text="Ship tested on →")
-    _diagonal_boxes(fig_deg, SHIP_ORDER)
+    _diagonal_boxes(fig_deg, ships_present)
 
     return fig_score, fig_deg, sorted(significant, key=lambda x: x[3])
 
 
-# ── Transfer Analysis — aggregated regime charts ───────────────────────────────
-
-MODEL_VARIANT_COLORS = {
-    "coastal":  "#60a5fa",
-    "handymax": "#34d399",
-    "panamax":  "#f59e0b",
-    "avg":      "#94a3b8",
-}
-
-
-def _make_transfer_bars(
-    df_tr: pd.DataFrame,
-    x_key: str,
-    bar_key: str,
-    avg_label: str,
-    title: str,
-    x_title: str,
-) -> Optional[go.Figure]:
-    """Shared logic for ship-perspective and model-fragility charts."""
-    from plotly.subplots import make_subplots
-
-    solvers_present = [s for s in ML_SOLVERS if s in df_tr["solver_name"].values]
-    if not solvers_present:
-        return None
-
-    fig = make_subplots(
-        rows=1, cols=len(solvers_present),
-        subplot_titles=[SOLVER_DISPLAY.get(s, s) for s in solvers_present],
-        shared_yaxes=True,
-    )
-    first = True
-
-    for col_i, solver in enumerate(solvers_present, start=1):
-        sub     = _ok(df_tr[df_tr["solver_name"] == solver])
-        grouped = sub.groupby(["ship_key", "model_key"])["final_score"].mean()
-        x_vals  = [s for s in SHIP_ORDER if s in sub[x_key].unique()]
-
-        bar_variants = SHIP_ORDER + ["avg"]
-        for bar_val in bar_variants:
-            ys, texts, lines = [], [], []
-            for xv in x_vals:
-                if bar_val == "avg":
-                    kv = [
-                        grouped.get((xv, bv) if x_key == "ship_key" else (bv, xv), np.nan)
-                        for bv in SHIP_ORDER
-                    ]
-                    val = np.nanmean(kv)
-                    lines.append(dict(color="#94a3b8", width=1))
-                else:
-                    pair = (xv, bar_val) if x_key == "ship_key" else (bar_val, xv)
-                    val  = grouped.get(pair, np.nan)
-                    in_regime = (xv == bar_val)
-                    lines.append(dict(
-                        color="#facc15" if in_regime else "rgba(0,0,0,0)",
-                        width=2.5,
-                    ))
-                ys.append(val)
-                texts.append(f"{val:.3f}" if not np.isnan(val) else "N/A")
-
-            if bar_val == "avg":
-                lbl = avg_label
-            else:
-                side = "Model" if bar_key == "model_key" else "Ship"
-                lbl = f"{side}: {bar_val.capitalize()}"
-
-            fig.add_trace(go.Bar(
-                name=lbl,
-                x=[v.capitalize() for v in x_vals],
-                y=ys,
-                text=texts,
-                textposition="outside",
-                marker=dict(color=MODEL_VARIANT_COLORS[bar_val], line=lines),
-                showlegend=first,
-            ), row=1, col=col_i)
-        first = False
-        fig.update_xaxes(title_text=x_title, row=1, col=col_i)
-
-    fig.add_hline(
-        y=0.92, line_dash="dash", line_color="#f59e0b", opacity=0.7,
-        annotation_text="0.92", annotation_font_color="#f59e0b",
-    )
-    fig.update_yaxes(range=[0.82, 1.07], title_text="Final Score", col=1)
-    fig.update_layout(
-        barmode="group",
-        title=dict(text=title, font=dict(size=13)),
-        height=400,
-        margin=dict(l=60, r=20, t=80, b=55),
-        legend=dict(orientation="h", yanchor="bottom", y=1.10, font=dict(size=10)),
-        **_DARK,
-    )
-    return fig
-
-
-def plot_ship_perspective(df_tr: pd.DataFrame) -> Optional[go.Figure]:
-    """Which model works best on each ship? X = ship tested on."""
-    return _make_transfer_bars(
-        df_tr,
-        x_key="ship_key",
-        bar_key="model_key",
-        avg_label="Ship avg (any model)",
-        title="Ship Perspective — Which model works best on each ship?",
-        x_title="Ship tested on →",
-    )
-
-
-def plot_model_fragility(df_tr: pd.DataFrame) -> Optional[go.Figure]:
-    """How robust is each trained model across ship sizes? X = model trained on."""
-    return _make_transfer_bars(
-        df_tr,
-        x_key="model_key",
-        bar_key="ship_key",
-        avg_label="Model avg (any ship)",
-        title="Model Fragility — How robust is each trained model across ship sizes?",
-        x_title="Model trained on →",
-    )
-
-
-def _regime_summary_table(df_tr: pd.DataFrame) -> pd.DataFrame:
-    """Flat table: solver × ship tested × model trained, with Δ vs in-regime score."""
-    rows = []
-    for solver in ML_SOLVERS:
-        sub = _ok(df_tr[df_tr["solver_name"] == solver])
-        if sub.empty:
-            continue
-        grouped = sub.groupby(["ship_key", "model_key"])["final_score"].mean()
-        for ship in SHIP_ORDER:
-            if ship not in sub["ship_key"].unique():
-                continue
-            in_val = grouped.get((ship, ship), np.nan)
-            for model in SHIP_ORDER:
-                val = grouped.get((ship, model), np.nan)
-                delta = (val - in_val) if not (np.isnan(val) or np.isnan(in_val)) else np.nan
-                label = model + (" ★" if model == ship else "")
-                rows.append({
-                    "Solver":           SOLVER_DISPLAY.get(solver, solver),
-                    "Ship tested":      ship,
-                    "Model trained on": label,
-                    "Score":            round(val,   4) if not np.isnan(val)   else None,
-                    "Δ in-regime":      round(delta, 4) if not np.isnan(delta) else None,
-                })
-            # General-avg synthetic row
-            all_vals  = [grouped.get((ship, m), np.nan) for m in SHIP_ORDER]
-            avg_val   = np.nanmean(all_vals)
-            avg_delta = (avg_val - in_val) if not np.isnan(in_val) else np.nan
-            rows.append({
-                "Solver":           SOLVER_DISPLAY.get(solver, solver),
-                "Ship tested":      ship,
-                "Model trained on": "avg (general)",
-                "Score":            round(avg_val,   4),
-                "Δ in-regime":      round(avg_delta, 4) if not np.isnan(avg_delta) else None,
-            })
-    return pd.DataFrame(rows)
-
-
-# ── Page setup ────────────────────────────────────────────────────────────────
+# ── Page setup ─────────────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="Benchmarks — Cargo Ship Loader",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 st.markdown("""
 <style>
   .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+  .case-card { background:#1e293b; border-radius:8px; padding:12px 16px;
+               border-left:4px solid; margin-bottom:8px; }
 </style>
 """, unsafe_allow_html=True)
-
-st.title("📊 Benchmark Results")
-st.caption(
-    "Pre-computed comparison of all solvers across ship sizes, loading scenarios, "
-    "and cross-ship transfer tests."
-)
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 
 data = _load_json()
 
 if data is None:
+    st.title("📊 Benchmark Results")
     st.warning(
         f"**No benchmark results found** at `{RESULTS_PATH.name}`.\n\n"
-        "Generate them with:\n"
-        "```\n"
-        "conda run -n personal python benchmark.py\n"
-        "```\n"
-        "Quick smoke test (coastal + balanced only, ~1 min):\n"
-        "```\n"
-        "conda run -n personal python benchmark.py "
-        "--ships coastal --scenarios balanced --no-transfer\n"
-        "```"
+        "Generate them with:\n```\nconda run -n personal python benchmark.py\n```\n\n"
+        "Quick smoke test (~1 min):\n```\n"
+        "conda run -n personal python benchmark.py --ships coastal --scenarios balanced --no-transfer\n```"
     )
     st.stop()
-
-# ── Metadata strip ────────────────────────────────────────────────────────────
-
-meta = data.get("metadata", {})
-mc1, mc2, mc3, mc4, mc5, mc6 = st.columns([2, 2, 1, 1, 2, 1])
-mc1.metric("Generated",  meta.get("generated_at", "?")[:19].replace("T", " "))
-mc2.metric("Ships",      "  ·  ".join(meta.get("ships_tested", [])))
-mc3.metric("Scenarios",  str(len(meta.get("scenarios_tested", []))))
-mc4.metric("Solvers",    str(len(meta.get("solvers_tested", []))))
-mc5.metric("Seeds",      "  ·  ".join(map(str, meta.get("seeds", []))))
-if mc6.button("↺ Reload"):
-    _load_json.clear()
-    st.rerun()
-
-st.divider()
-
-# ── DataFrames ────────────────────────────────────────────────────────────────
 
 df_std = _to_df(data.get("standard", []))
 df_tr  = _to_df(data.get("transfer", []))
@@ -662,211 +840,352 @@ if df_std.empty:
     st.error("Standard benchmark data is empty.")
     st.stop()
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
+# ── Sidebar — global filters ───────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "Overview",
-    "Scenario Deep-Dive",
-    "Transfer Analysis",
-    "Raw Data",
+with st.sidebar:
+    st.title("📊 Benchmarks")
+    meta = data.get("metadata", {})
+    st.caption(f"Run: {meta.get('generated_at', '?')[:19].replace('T', ' ')}")
+
+    st.divider()
+    st.subheader("Filters")
+
+    ships_available   = [s for s in SHIP_ORDER   if s in df_std["ship_key"].unique()]
+    solvers_available = [s for s in SOLVER_ORDER if s in df_std["solver_name"].unique()]
+
+    sel_ships = st.multiselect(
+        "Ships", ships_available,
+        default=ships_available,
+        format_func=lambda s: SHIP_DISPLAY.get(s, s),
+        key="g_ships",
+    )
+    sel_solvers = st.multiselect(
+        "Solvers", solvers_available,
+        default=solvers_available,
+        format_func=lambda s: SOLVER_DISPLAY.get(s, s),
+        key="g_solvers",
+    )
+
+    if not sel_ships or not sel_solvers:
+        st.warning("Select at least one ship and one solver.")
+        st.stop()
+
+    st.divider()
+    st.caption(
+        f"**{len(meta.get('seeds', []))} seeds** · "
+        f"**{len(meta.get('scenarios_tested', []))} cases** · "
+        f"**{len(meta.get('solvers_tested', []))} solvers**"
+    )
+    if st.button("↺ Reload data"):
+        _load_json.clear()
+        st.rerun()
+
+    st.divider()
+    st.subheader("Case definitions")
+    for sc, d in CASE_DEFS.items():
+        if sc in df_std["scenario"].unique():
+            with st.expander(f"{d['icon']} {d['title']}"):
+                st.caption(d["summary"])
+                st.markdown(
+                    f"**Tests:** {d['tests']}  \n"
+                    f"**Constraint:** {d['constraint']}  \n"
+                    f"**Weights:** {d['weights']}  \n"
+                    f"**Mix:** {d['mix']}  \n"
+                    f"**Distribution:** {d['dist']}"
+                )
+
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+
+tab_ov, tab_case, tab_ship, tab_flex, tab_raw = st.tabs([
+    "🗺 Overview",
+    "📋 Case Level",
+    "🚢 Ship Level",
+    "🔀 Flexibility",
+    "🗄 Raw Data",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Tab 1 — Overview
+# Overview
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab1:
-    st.subheader("Performance by Solver & Ship")
-
-    sc_options = ["All"] + [s for s in SCENARIO_ORDER if s in df_std["scenario"].unique()]
-    sc_sel_ov  = st.selectbox("Filter by scenario", sc_options, key="ov_sc")
+with tab_ov:
+    st.subheader("Overview — All Ships & Cases")
+    st.caption(
+        "High-level snapshot across every selected ship, case, and seed. "
+        "Use the sidebar to filter ships and solvers. Drill into specific cases or ships "
+        "using the **Case Level** and **Ship Level** tabs."
+    )
 
     col_a, col_b = st.columns(2)
     with col_a:
-        st.plotly_chart(plot_score_heatmap(df_std, sc_sel_ov), use_container_width=True)
+        st.plotly_chart(plot_score_heatmap(df_std, sel_ships, sel_solvers),
+                        use_container_width=True)
+        st.caption(
+            "Each cell = mean final score averaged over **all cases and all seeds** "
+            "for that (solver, ship) pair."
+        )
     with col_b:
-        st.plotly_chart(plot_runtime_scatter(df_std), use_container_width=True)
+        st.plotly_chart(plot_runtime_bar(df_std, sel_ships, sel_solvers),
+                        use_container_width=True)
+        st.caption(
+            "Mean runtime per (solver, ship). Log scale — notice how runtimes "
+            "scale with ship size for iterative solvers."
+        )
 
     st.divider()
-    st.subheader("Placement Rate by Scenario")
-    st.caption(
-        "Shows what fraction of containers were actually placed. "
-        "Values < 100 % mean the weight or space cap was binding."
+    st.plotly_chart(
+        plot_score_vs_runtime(df_std, sel_ships, sel_solvers),
+        use_container_width=True,
     )
-    st.plotly_chart(plot_placement_heatmap(df_std), use_container_width=True)
-
-    if "cog_height_norm" in df_std.columns and _ok(df_std)["cog_height_norm"].gt(0).any():
-        st.divider()
-        st.subheader("Centre-of-Gravity Height")
-        st.caption(
-            "Lower CoG = better metacentric stability. "
-            "Computed as normalised Gz = Σ(w·tier) / (total_weight × (height−1))."
-        )
-        st.plotly_chart(plot_cog_bars(df_std), use_container_width=True)
+    st.caption(
+        "Each point = one (solver, ship) mean. "
+        "Ideal solvers sit **top-left** (fast and accurate)."
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Tab 2 — Scenario Deep-Dive
+# Case Level
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab2:
-    sc_options_2 = [s for s in SCENARIO_ORDER if s in df_std["scenario"].unique()]
-    if not sc_options_2:
-        st.info("No scenario data available.")
+with tab_case:
+    cases_present = [s for s in SCENARIO_ORDER if s in df_std["scenario"].unique()]
+    if not cases_present:
+        st.info("No case data available.")
     else:
-        sc_sel_2 = st.selectbox("Scenario", sc_options_2, key="sc2_sel")
+        sel_case = st.radio(
+            "Select case",
+            cases_present,
+            format_func=lambda s: f"{CASE_DEFS[s]['icon']}  {CASE_DEFS[s]['title']}",
+            horizontal=True,
+            key="case_sel",
+        )
+
+        # Case definition card
+        d = CASE_DEFS.get(sel_case, {})
+        st.info(
+            f"**{d.get('icon', '')} {d.get('title', sel_case)} — What this case tests:**  \n"
+            f"{d.get('tests', '')}  \n\n"
+            f"| Binding constraint | Weight range | Container mix | Distribution |  \n"
+            f"|---|---|---|---|  \n"
+            f"| {d.get('constraint', '—')} | {d.get('weights', '—')} "
+            f"| {d.get('mix', '—')} | {d.get('dist', '—')} |"
+        )
+
+        st.divider()
 
         col_a, col_b = st.columns(2)
         with col_a:
-            st.plotly_chart(plot_scenario_score(df_std, sc_sel_2), use_container_width=True)
+            st.plotly_chart(
+                plot_case_scores(df_std, sel_case, sel_ships, sel_solvers),
+                use_container_width=True,
+            )
         with col_b:
-            st.plotly_chart(plot_scenario_runtime(df_std, sc_sel_2), use_container_width=True)
+            st.plotly_chart(
+                plot_case_runtime(df_std, sel_case, sel_ships, sel_solvers),
+                use_container_width=True,
+            )
 
-        st.plotly_chart(plot_balance_breakdown(df_std, sc_sel_2), use_container_width=True)
+        st.plotly_chart(
+            plot_case_balance(df_std, sel_case, sel_ships, sel_solvers),
+            use_container_width=True,
+        )
 
-        # Placement callout for capacity-constrained scenarios
-        if sc_sel_2 in ("weight_limited", "space_limited"):
+        if sel_case in ("weight_limited", "space_limited"):
             st.divider()
             st.subheader("Placement Rate Detail")
             st.caption(
-                "These scenarios are capacity-constrained. "
-                "The table shows the mean % of containers placed per (solver, ship) combination."
+                "This is a capacity-constrained case. "
+                "Values < 100 % mean containers were left ashore."
             )
-            sub_placed = _ok(df_std[df_std["scenario"] == sc_sel_2])
-            pivot_placed = (
-                sub_placed
-                .groupby(["solver_name", "ship_key"])["pct_placed"]
+            sub_p = _filter(df_std[df_std["scenario"] == sel_case], sel_ships, sel_solvers)
+            pivot = (
+                sub_p.groupby(["solver_name", "ship_key"])["pct_placed"]
                 .mean()
-                .unstack(level="ship_key")
+                .unstack("ship_key")
                 .rename(index=SOLVER_DISPLAY)
-                .reindex(columns=[s for s in SHIP_ORDER if s in sub_placed["ship_key"].unique()])
+                .reindex(columns=[s for s in sel_ships if s in sub_p["ship_key"].unique()])
+                .rename(columns=SHIP_DISPLAY)
             )
-            st.dataframe(pivot_placed.round(1).style.background_gradient(
-                cmap="RdYlGn", axis=None, vmin=0, vmax=100
-            ), use_container_width=True)
+            if not pivot.empty:
+                st.dataframe(
+                    pivot.round(1).style.background_gradient(cmap="RdYlGn", axis=None, vmin=0, vmax=100),
+                    use_container_width=True,
+                )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Tab 3 — Transfer Analysis
+# Ship Level
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab3:
-    if not has_transfer:
-        st.info(
-            "No transfer results found.\n\n"
-            "Re-run the benchmark without `--no-transfer`:\n"
-            "```\n"
-            "conda run -n personal python benchmark.py\n"
-            "```"
-        )
+with tab_ship:
+    ships_in_data = [s for s in SHIP_ORDER if s in df_std["ship_key"].unique()]
+    sel_ship = st.radio(
+        "Select ship",
+        [s for s in ships_in_data if s in sel_ships],
+        format_func=lambda s: SHIP_DISPLAY.get(s, s),
+        horizontal=True,
+        key="ship_sel",
+    )
+
+    if sel_ship is None:
+        st.info("No ships available for the current filter.")
     else:
-        st.subheader("Cross-Ship Transfer Analysis")
-        with st.expander("ℹ What is transfer testing?", expanded=True):
-            st.markdown(
-                "ML models (**Neural Ranker**, **RL Bayesian**) are trained on a specific ship size. "
-                "Transfer tests apply these pre-trained models *unchanged* to ships of **different sizes** — "
-                "measuring how well the model generalises.\n\n"
-                "| Symbol | Meaning |\n"
-                "|--------|--------|\n"
-                "| ★ yellow border | In-speciality (model trained on the same ship) |\n"
-                "| Δ Score < −0.03 | Out-of-speciality — significant degradation |\n\n"
-                "**Why degradation occurs:**\n"
-                "- *Neural Ranker*: position features are normalised by training-ship dimensions. "
-                "  Applying to a different ship shifts the input distribution.\n"
-                "- *RL Bayesian*: manifest feature `n_20ft / ship.length` uses the live ship's length, "
-                "  so a panamax model applied to a coastal ship sees out-of-distribution ratios."
-            )
-
-        st.subheader("At a Glance — Specific vs General-Model Performance")
-        st.caption(
-            "Each cluster of bars shows, for a given test ship, how each specific trained model "
-            "performs (gold border = in-regime) alongside the general-average score you'd expect "
-            "from an arbitrarily chosen model. Larger gaps between the in-regime bar and the others "
-            "indicate stronger specialisation."
-        )
-        fig_ship = plot_ship_perspective(df_tr)
-        if fig_ship is not None:
-            st.plotly_chart(fig_ship, use_container_width=True)
-
-        st.subheader("Model Fragility — Robustness Across Ship Sizes")
-        st.caption(
-            "For each trained model, shows how it performs when deployed to every ship size. "
-            "A fragile model has a high in-regime bar (gold border) but much lower bars elsewhere. "
-            "A robust model keeps all bars close together near the in-regime score."
-        )
-        fig_frag = plot_model_fragility(df_tr)
-        if fig_frag is not None:
-            st.plotly_chart(fig_frag, use_container_width=True)
-
-        st.subheader("Full Transfer Results Table")
-        regime_df = _regime_summary_table(df_tr)
-        if not regime_df.empty:
-            st.dataframe(
-                regime_df.style.background_gradient(
-                    subset=["Δ in-regime"], cmap="RdYlGn_r", vmin=-0.10, vmax=0.01
-                ),
-                use_container_width=True,
-            )
-        else:
-            st.caption("No transfer data available for regime table.")
+        # Ship profile strip
+        prof = SHIP_PROFILE.get(sel_ship, {})
+        pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+        pc1.metric("Length", f"{prof.get('length', '?')} bays")
+        pc2.metric("Beam", f"{prof.get('beam', '?')} cols")
+        pc3.metric("Height", f"{prof.get('height', '?')} tiers")
+        pc4.metric("Keel width", f"{prof.get('keel', '?')} cols")
+        pc5.metric("Max weight", prof.get("max_weight", "?"))
 
         st.divider()
 
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.plotly_chart(
+                plot_ship_scores_by_case(df_std, sel_ship, sel_solvers),
+                use_container_width=True,
+            )
+        with col_b:
+            st.plotly_chart(
+                plot_ship_runtime_by_case(df_std, sel_ship, sel_solvers),
+                use_container_width=True,
+            )
+
+        st.plotly_chart(
+            plot_ship_seed_variance(df_std, sel_ship, sel_solvers),
+            use_container_width=True,
+        )
+        st.caption(
+            "Error bars show the min and max score across seeds. "
+            "Tall bars = the algorithm's quality depends heavily on the random seed "
+            "(less consistent / reliable)."
+        )
+
+        if "cog_height_norm" in df_std.columns:
+            st.divider()
+            st.plotly_chart(
+                plot_ship_cog(df_std, sel_ship, sel_solvers),
+                use_container_width=True,
+            )
+            st.caption("Lower CoG = better metacentric stability.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Flexibility
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_flex:
+    st.subheader("Algorithm Flexibility & Robustness")
+    with st.expander("ℹ️ What is flexibility?", expanded=True):
+        st.markdown(
+            "**Flexibility** measures how consistently an algorithm performs "
+            "across **all** ship sizes and loading cases — not just its best-case scenario.\n\n"
+            "| Metric | Definition |\n"
+            "|--------|------------|\n"
+            "| **Mean score** | Average final score across all (ship, case, seed) combinations |\n"
+            "| **Std dev** | How much scores vary — lower = more predictable |\n"
+            "| **Worst case** | Minimum score seen across all conditions |\n"
+            "| **Range** | max − min score — lower = more consistent |\n"
+            "| **Flex score†** | mean − 2×std — rewards high average, penalises variance |\n\n"
+            "A **flexible** algorithm has a high flex score: it works well everywhere, "
+            "not just in ideal conditions. A **specialist** algorithm may peak higher "
+            "in one regime but degrade elsewhere."
+        )
+
+    flex_stats = _flexibility_stats(df_std, sel_ships, sel_solvers)
+    if not flex_stats.empty:
+        st.plotly_chart(plot_flexibility_table_fig(flex_stats), use_container_width=True)
+
+    st.divider()
+
+    col_a, col_b = st.columns([3, 2])
+    with col_a:
+        st.plotly_chart(
+            plot_combo_heatmap(df_std, sel_ships, sel_solvers),
+            use_container_width=True,
+        )
+        st.caption(
+            "Every (ship × case) combination as a separate column. "
+            "Horizontal bands of uniform colour = the algorithm is consistent. "
+            "Patchy rows = performance depends heavily on the specific condition."
+        )
+    with col_b:
+        radar = plot_radar(df_std, sel_ships, sel_solvers)
+        if radar.data:
+            st.plotly_chart(radar, use_container_width=True)
+            st.caption(
+                "Spider chart: each axis = one case type. "
+                "A large, even polygon = flexible across all cases. "
+                "A lopsided shape = specialist."
+            )
+
+    st.divider()
+    st.plotly_chart(
+        plot_runtime_vs_score_scatter(df_std, sel_ships, sel_solvers),
+        use_container_width=True,
+    )
+    st.caption(
+        "Marker colour = case type. Border colour = solver. "
+        "Marker shape encodes ship (circle=coastal, square=handymax, diamond=panamax). "
+        "Vertical spread per solver = sensitivity to case type."
+    )
+
+    # ── Transfer analysis for ML solvers ──────────────────────────────────────
+    if has_transfer:
+        st.divider()
+        st.subheader("ML Solver Transfer Flexibility")
+        with st.expander("ℹ️ What is transfer testing?", expanded=False):
+            st.markdown(
+                "ML solvers (**Neural Ranker**, **RL Bayesian**) are trained on a specific ship. "
+                "Transfer tests apply them *unchanged* to ships of different sizes, measuring "
+                "out-of-distribution generalisation.\n\n"
+                "| Symbol | Meaning |\n"
+                "|--------|--------|\n"
+                "| ★ yellow border | In-speciality (model tested on the ship it was trained for) |\n"
+                "| Δ < −0.03 | Significant degradation out-of-speciality |"
+            )
+
         for solver in ML_SOLVERS:
-            if df_tr.empty or solver not in df_tr["solver_name"].values:
+            if solver not in df_tr["solver_name"].values:
                 st.caption(f"No transfer data for **{SOLVER_DISPLAY.get(solver, solver)}**.")
                 continue
 
-            st.subheader(f"🤖 {SOLVER_DISPLAY.get(solver, solver)} — Score & Degradation Maps")
-
+            st.subheader(f"{SOLVER_DISPLAY.get(solver, solver)}")
             fig_sc, fig_deg, significant = plot_transfer_pair(df_tr, solver)
             if fig_sc is None:
                 st.caption("No data available.")
                 continue
 
-            col_a, col_b = st.columns(2)
-            with col_a:
+            c1, c2 = st.columns(2)
+            with c1:
                 st.plotly_chart(fig_sc, use_container_width=True)
-                st.caption(
-                    "Rows = ship the model is **tested on**. "
-                    "Cols = ship the model was **trained on**. "
-                    "★ = in-speciality (diagonal)."
-                )
-            with col_b:
+                st.caption("★ diagonal = in-speciality. Off-diagonal = cross-ship transfer.")
+            with c2:
                 st.plotly_chart(fig_deg, use_container_width=True)
-                st.caption(
-                    "Δ Score vs. the matched diagonal. "
-                    "Red = worse than in-speciality. Blue = better."
-                )
+                st.caption("Red = worse than in-speciality. Blue = better.")
 
             if significant:
                 severe   = [(s, m, sc, d) for s, m, sc, d in significant if d < -0.05]
                 moderate = [(s, m, sc, d) for s, m, sc, d in significant if -0.05 <= d < -0.03]
                 if severe:
-                    items = "\n".join(
-                        f"- **{ship}** ship ← **{model}** model: "
-                        f"score = {sc:.3f}  (Δ {d:+.3f})"
-                        for ship, model, sc, d in severe
-                    )
-                    st.error(f"**Severe degradation** (Δ < −0.05):\n\n{items}")
+                    st.error("**Severe degradation** (Δ < −0.05):\n" + "\n".join(
+                        f"- **{s}** ← **{m}** model: {sc:.3f} (Δ {d:+.3f})"
+                        for s, m, sc, d in severe
+                    ))
                 if moderate:
-                    items = "\n".join(
-                        f"- **{ship}** ship ← **{model}** model: "
-                        f"score = {sc:.3f}  (Δ {d:+.3f})"
-                        for ship, model, sc, d in moderate
-                    )
-                    st.warning(f"**Out-of-speciality cases** (−0.05 ≤ Δ < −0.03):\n\n{items}")
+                    st.warning("**Out-of-speciality** (−0.05 ≤ Δ < −0.03):\n" + "\n".join(
+                        f"- **{s}** ← **{m}** model: {sc:.3f} (Δ {d:+.3f})"
+                        for s, m, sc, d in moderate
+                    ))
             else:
-                st.success("No significant cross-ship degradation detected (all Δ ≥ −0.03).")
-
-            st.divider()
+                st.success("No significant cross-ship degradation (all Δ ≥ −0.03).")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Tab 4 — Raw Data
+# Raw Data
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab4:
+with tab_raw:
     st.subheader("Raw Results")
 
-    # Combine standard + transfer
     dfs_all = []
     if not df_std.empty:
         tmp = df_std.copy(); tmp["type"] = "standard"; dfs_all.append(tmp)
@@ -874,36 +1193,33 @@ with tab4:
         tmp = df_tr.copy();  tmp["type"] = "transfer";  dfs_all.append(tmp)
     all_df = pd.concat(dfs_all, ignore_index=True)
 
-    # Filters
     fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
-        ship_f = st.multiselect("Ship", SHIP_ORDER, default=SHIP_ORDER, key="raw_ship")
+        raw_ships = st.multiselect("Ship", SHIP_ORDER, default=sel_ships, key="raw_ship")
     with fc2:
-        sc_f   = st.multiselect(
+        raw_sc = st.multiselect(
             "Scenario", SCENARIO_ORDER,
             default=[s for s in SCENARIO_ORDER if s in all_df["scenario"].unique()],
             key="raw_sc",
         )
     with fc3:
-        sv_f   = st.multiselect("Solver", SOLVER_ORDER, default=SOLVER_ORDER, key="raw_sv")
+        raw_sv = st.multiselect("Solver", SOLVER_ORDER, default=sel_solvers, key="raw_sv")
     with fc4:
         show_err = st.checkbox("Include errors / skips", value=False, key="raw_err")
         type_opts = all_df["type"].unique().tolist() if "type" in all_df.columns else ["standard"]
-        type_f = st.multiselect("Type", type_opts, default=type_opts, key="raw_type")
+        raw_type = st.multiselect("Type", type_opts, default=type_opts, key="raw_type")
 
     mask = (
-        all_df["ship_key"].isin(ship_f) &
-        all_df["scenario"].isin(sc_f) &
-        all_df["solver_name"].isin(sv_f)
+        all_df["ship_key"].isin(raw_ships) &
+        all_df["scenario"].isin(raw_sc) &
+        all_df["solver_name"].isin(raw_sv)
     )
     if "type" in all_df.columns:
-        mask &= all_df["type"].isin(type_f)
+        mask &= all_df["type"].isin(raw_type)
     if not show_err:
         mask &= all_df["error"].isna()
 
     display_df = all_df[mask].copy()
-
-    # Column order
     cols_ordered = [c for c in [
         "type", "ship_key", "scenario", "solver_name", "model_key", "seed",
         "final_score", "ps_ratio", "fa_ratio", "diag_ratio",
@@ -915,11 +1231,7 @@ with tab4:
 
     st.caption(f"Showing **{len(display_df)}** rows")
     st.dataframe(display_df.round(4), use_container_width=True, height=520)
-
-    csv = display_df.to_csv(index=False)
     st.download_button(
-        "⬇ Download as CSV",
-        csv,
-        file_name="benchmark_results.csv",
-        mime="text/csv",
+        "⬇ Download as CSV", display_df.to_csv(index=False),
+        file_name="benchmark_results.csv", mime="text/csv",
     )
