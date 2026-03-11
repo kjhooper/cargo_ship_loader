@@ -75,10 +75,11 @@ class RLBayesianSASolver(SimulatedAnnealingSolver):
         k_list: float       = 4.0,
         k_diag: float       = 6.0,
         k_stacking: float   = 0.5,
+        k_unload: float     = 2.0,
     ):
         super().__init__(
             ship, n_iterations, T_start, cooling, seed,
-            k_gz, k_trim, k_list, k_diag, k_stacking,
+            k_gz, k_trim, k_list, k_diag, k_stacking, k_unload,
         )
         self.model_path: Optional[Path] = Path(model_path) if model_path else None
 
@@ -104,7 +105,7 @@ class RLBayesianSASolver(SimulatedAnnealingSolver):
                 self.ship,
                 k_gz=self.k_gz, k_trim=self.k_trim,
                 k_list=self.k_list, k_diag=self.k_diag,
-                k_stacking=self.k_stacking,
+                k_stacking=self.k_stacking, k_unload=self.k_unload,
             )
             self.manifest = loader.load(containers)
 

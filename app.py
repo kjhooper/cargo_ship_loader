@@ -25,7 +25,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from algorithm import CargoLoader
+from algorithm import BaseSolver, CargoLoader
 from models import CargoShip, ShippingContainer
 from visualizer import ComparisonVisualizer, Visualizer
 
@@ -131,7 +131,7 @@ def load_neural_ranker(model_key: str, ship_cfg_hash: str) -> Optional[NeuralRan
 
 
 def make_containers(n_20ft, n_40ft, dist_type, w_min, w_max,
-                    w_mean, w_std, seed) -> List[ShippingContainer]:
+                    w_mean, w_std, seed, n_stops: int = 1) -> List[ShippingContainer]:
     rng = random.Random(seed)
     ShippingContainer.reset_id_counter()
 
@@ -149,9 +149,12 @@ def make_containers(n_20ft, n_40ft, dist_type, w_min, w_max,
             t = rng.betavariate(3.0, 1.0)
             return round(w_min + t * (w_max - w_min), 1)
 
+    def facility():
+        return rng.randint(1, max(n_stops, 1))
+
     containers = (
-        [ShippingContainer(size=1, weight=sample()) for _ in range(n_20ft)]
-        + [ShippingContainer(size=2, weight=sample()) for _ in range(n_40ft)]
+        [ShippingContainer(size=1, weight=sample(), facility=facility()) for _ in range(n_20ft)]
+        + [ShippingContainer(size=2, weight=sample(), facility=facility()) for _ in range(n_40ft)]
     )
     rng.shuffle(containers)
     return containers
@@ -222,6 +225,7 @@ def collect_stats(manifest: List[Dict], ship: CargoShip, elapsed: float) -> Dict
         "FA balance ratio":    f"{fa:.4f}",
         "Diagonal ratio":      f"{diag:.4f}",
         "Final score":         f"{(ps+fa+diag)/3:.4f}",
+        "Unloading score":     f"{BaseSolver.unloading_score(manifest):.4f}",
         "CoG height (norm)":   f"{gz:.3f}",
         "Runtime (s)":         f"{elapsed:.2f}",
     }
@@ -488,10 +492,21 @@ def plot_final_state(manifest: List[Dict], ship: CargoShip,
     return fig
 
 
-def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.Figure:
-    """3D interactive ship loading visualisation — hull taper + coloured container boxes."""
+def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "",
+                  color_by: str = "weight") -> go.Figure:
+    """3D interactive ship loading visualisation — hull taper + coloured container boxes.
+
+    color_by : "weight"    — colour by container weight (RdBu_r, default)
+               "port_stop" — colour by facility / port-stop number (Plasma)
+    """
     placed = [e for e in manifest if e["placed"]]
     max_w  = max((e["weight"] for e in placed), default=1.0)
+
+    # Pre-compute facility range for port-stop mode
+    fac_vals = [e.get("facility", 1) for e in placed]
+    fac_min  = min(fac_vals) if fac_vals else 1
+    fac_max  = max(fac_vals) if fac_vals else 1
+    fac_range = max(fac_max - fac_min, 1)
 
     # ── Box-mesh helpers ──────────────────────────────────────────────────────
     def _box(x0, x1, y0, y1, z0, z1):
@@ -526,15 +541,15 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
         rc  = lc + cw
         if lc > 0:
             h_boxes.append((0, ship.length, 0, lc, tier, tier + 1))
-            h_cols.append("rgba(51,65,85,0.6)")
+            h_cols.append("rgba(100,116,139,0.88)")
         if rc < ship.width:
             h_boxes.append((0, ship.length, rc, ship.width, tier, tier + 1))
-            h_cols.append("rgba(51,65,85,0.6)")
+            h_cols.append("rgba(100,116,139,0.88)")
     if h_boxes:
         hx,hy,hz,hi,hj,hk,hfc = _batch(h_boxes, h_cols)
         traces.append(go.Mesh3d(
             x=hx, y=hy, z=hz, i=hi, j=hj, k=hk,
-            facecolor=hfc, flatshading=True, opacity=0.55,
+            facecolor=hfc, flatshading=True, opacity=0.78,
             name="Hull", showlegend=True, showscale=False,
             hoverinfo="skip",
         ))
@@ -544,9 +559,14 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
         c_boxes, c_cols = [], []
         hov_x, hov_y, hov_z, hov_text = [], [], [], []
         for e in placed:
-            pos   = e["bay"] * 2 + (e.get("half") or 0)
-            t     = e["weight"] / max_w
-            color = pc.sample_colorscale("RdBu_r", [t])[0]
+            pos = e["bay"] * 2 + (e.get("half") or 0)
+            if color_by == "port_stop":
+                fac = e.get("facility", 1)
+                t   = (fac - fac_min) / fac_range
+                color = pc.sample_colorscale("Plasma", [t])[0]
+            else:
+                t     = e["weight"] / max_w
+                color = pc.sample_colorscale("RdBu_r", [t])[0]
             c_boxes.append((
                 pos, pos + e["size"],
                 e["col"], e["col"] + 1,
@@ -562,6 +582,7 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
                 f"ID {e['container_id']} · "
                 f"{'40 ft' if e['size'] == 2 else '20 ft'}<br>"
                 f"Weight: {e['weight']:,.0f} kg<br>"
+                f"Port stop: {e.get('facility', 1)}<br>"
                 f"Bay {e['bay']} ({half_str}), Col {e['col']}, Tier {e['tier']}"
             )
 
@@ -582,22 +603,41 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
             hovertemplate="%{customdata}<extra></extra>",
             showlegend=False,
         ))
-        # Dummy trace for weight colorbar
-        wts = [e["weight"] for e in placed]
-        traces.append(go.Scatter3d(
-            x=[None]*len(wts), y=[None]*len(wts), z=[None]*len(wts),
-            mode="markers",
-            marker=dict(
-                color=wts, colorscale="RdBu_r",
-                cmin=min(wts), cmax=max(wts),
-                colorbar=dict(
-                    title=dict(text="Weight (kg)", side="right"),
-                    thickness=14, len=0.55, x=1.0, tickformat=",d",
+        # Dummy trace for colorbar
+        if color_by == "port_stop":
+            stop_nums = list(range(fac_min, fac_max + 1))
+            traces.append(go.Scatter3d(
+                x=[None]*len(fac_vals), y=[None]*len(fac_vals), z=[None]*len(fac_vals),
+                mode="markers",
+                marker=dict(
+                    color=fac_vals, colorscale="Plasma",
+                    cmin=fac_min, cmax=fac_max,
+                    colorbar=dict(
+                        title=dict(text="Port stop", side="right"),
+                        thickness=14, len=0.55, x=1.0,
+                        tickvals=stop_nums,
+                        ticktext=[str(s) for s in stop_nums],
+                    ),
+                    showscale=True, size=0,
                 ),
-                showscale=True, size=0,
-            ),
-            showlegend=False, hoverinfo="skip",
-        ))
+                showlegend=False, hoverinfo="skip",
+            ))
+        else:
+            wts = [e["weight"] for e in placed]
+            traces.append(go.Scatter3d(
+                x=[None]*len(wts), y=[None]*len(wts), z=[None]*len(wts),
+                mode="markers",
+                marker=dict(
+                    color=wts, colorscale="RdBu_r",
+                    cmin=min(wts), cmax=max(wts),
+                    colorbar=dict(
+                        title=dict(text="Weight (kg)", side="right"),
+                        thickness=14, len=0.55, x=1.0, tickformat=",d",
+                    ),
+                    showscale=True, size=0,
+                ),
+                showlegend=False, hoverinfo="skip",
+            ))
 
     # ── Ship boundary wireframe ───────────────────────────────────────────────
     L, W, H = ship.length, ship.width, ship.height
@@ -630,7 +670,7 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="#0f172a",
-        uirevision=title or "3D Loading State",  # reset camera when solver changes
+        uirevision=title or "3D Loading State",  # stable per solver; color mode change rerenders but keeps camera
         title=dict(
             text=(
                 f"{title or '3D Loading State'}<br>"
@@ -669,8 +709,8 @@ def plot_3d_state(manifest: List[Dict], ship: CargoShip, title: str = "") -> go.
 
 
 def plot_solver_metrics(stats: Dict, name: str) -> go.Figure:
-    METRIC_KEYS = ["PS balance ratio", "FA balance ratio", "Diagonal ratio", "Final score"]
-    labels      = ["PS ratio", "FA ratio", "Diag ratio", "Final score"]
+    METRIC_KEYS = ["PS balance ratio", "FA balance ratio", "Diagonal ratio", "Final score", "Unloading score"]
+    labels      = ["PS ratio", "FA ratio", "Diag ratio", "Final score", "Unload score"]
     values      = [float(stats[m]) for m in METRIC_KEYS]
     colors = [
         "#22c55e" if v >= 0.97 else ("#f59e0b" if v >= 0.92 else "#ef4444")
@@ -704,8 +744,8 @@ def plot_solver_metrics(stats: Dict, name: str) -> go.Figure:
 
 
 def plot_summary_comparison(results: Dict) -> go.Figure:
-    METRIC_KEYS = ["PS balance ratio", "FA balance ratio", "Diagonal ratio", "Final score"]
-    x_labels    = ["PS ratio", "FA ratio", "Diag ratio", "Final score"]
+    METRIC_KEYS = ["PS balance ratio", "FA balance ratio", "Diagonal ratio", "Final score", "Unloading score"]
+    x_labels    = ["PS ratio", "FA ratio", "Diag ratio", "Final score", "Unload score"]
     palette     = ["#60a5fa", "#34d399", "#f59e0b", "#f87171", "#a78bfa"]
 
     fig = go.Figure()
@@ -877,9 +917,11 @@ with st.sidebar:
         w_std  = (w_max - w_min) // 4
 
     seed = st.number_input("Random seed", 0, 99_999, 42)
+    n_stops = st.slider("Port stops", min_value=1, max_value=10, value=1,
+                        help="1 = single destination (no unloading constraint). Higher = multi-stop route.")
 
     if n_20ft + n_40ft > 0:
-        _preview = make_containers(n_20ft, n_40ft, dist_type, w_min, w_max, w_mean, w_std, seed)
+        _preview = make_containers(n_20ft, n_40ft, dist_type, w_min, w_max, w_mean, w_std, seed, n_stops=n_stops)
         _total_w = sum(c.weight for c in _preview)
         _delta_w = _total_w - max_weight_kg
         st.metric(
@@ -959,6 +1001,12 @@ with st.sidebar:
     st.subheader("Display")
     show_anim = st.toggle("Show loading animations", value=True,
                           help="Generates a GIF per solver (~10–15 s each).")
+    color_3d_by = st.radio(
+        "3D colour by",
+        ["Weight", "Port stop"],
+        horizontal=True,
+        help="Switch the 3D container colour between cargo weight and port-stop number.",
+    )
 
     st.divider()
     run_btn = st.button("▶  Run solvers", type="primary",
@@ -980,7 +1028,7 @@ with prev_col:
     st.plotly_chart(plot_hull_preview(ship_cfg), use_container_width=True)
 
 containers_preview = make_containers(
-    n_20ft, n_40ft, dist_type, w_min, w_max, w_mean, w_std, seed
+    n_20ft, n_40ft, dist_type, w_min, w_max, w_mean, w_std, seed, n_stops=n_stops
 )
 with dist_col:
     st.subheader("Container weights")
@@ -1012,7 +1060,7 @@ if "RL Bayesian" in selected_solvers and _RL_BAYESIAN:
 # Run all solvers
 results: Dict[str, Tuple[List[Dict], CargoShip, Dict]] = {}
 containers = make_containers(
-    n_20ft, n_40ft, dist_type, w_min, w_max, w_mean, w_std, seed
+    n_20ft, n_40ft, dist_type, w_min, w_max, w_mean, w_std, seed, n_stops=n_stops
 )
 
 with st.spinner(f"Running {len(selected_solvers)} solver(s)…"):
@@ -1021,7 +1069,7 @@ with st.spinner(f"Running {len(selected_solvers)} solver(s)…"):
         # Neural ranker needs the containers to use the same IDs — regenerate fresh
         ShippingContainer.reset_id_counter()
         conts = make_containers(n_20ft, n_40ft, dist_type, w_min, w_max,
-                                w_mean, w_std, seed)
+                                w_mean, w_std, seed, n_stops=n_stops)
         manifest, elapsed = run_solver(
             name, ship, conts, beam_k, sa_iters, n_trials,
             neural_ranker_model, rl_bayesian=rl_bayesian_model,
@@ -1058,8 +1106,13 @@ for i, (name, (manifest, ship, stats)) in enumerate(results.items()):
         st.markdown(f"### {name}")
 
         st.plotly_chart(plot_solver_metrics(stats, name), use_container_width=True)
-        st.plotly_chart(plot_3d_state(manifest, ship, title=name),
-                        use_container_width=True)
+        st.plotly_chart(
+            plot_3d_state(
+                manifest, ship, title=name,
+                color_by="port_stop" if color_3d_by == "Port stop" else "weight",
+            ),
+            use_container_width=True,
+        )
 
         if show_anim:
             with st.spinner(f"Generating {name} animation…"):

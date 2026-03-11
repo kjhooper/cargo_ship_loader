@@ -82,13 +82,14 @@ class BayesianOptSolver(BaseSolver):
             k_list     = trial.suggest_float("k_list",     0.5, 12.0)
             k_diag     = trial.suggest_float("k_diag",     0.5, 12.0)
             k_stacking = trial.suggest_float("k_stacking", 0.0,  2.0)
+            k_unload   = trial.suggest_float("k_unload",   0.0,  6.0)
 
             trial_ship = self._fresh_ship()
             loader = CargoLoader(
                 trial_ship,
                 k_gz=k_gz, k_trim=k_trim,
                 k_list=k_list, k_diag=k_diag,
-                k_stacking=k_stacking,
+                k_stacking=k_stacking, k_unload=k_unload,
             )
             loader.load(containers)
             # BaseSolver.final_score() — called on trial_ship via loader

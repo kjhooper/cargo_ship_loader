@@ -186,16 +186,18 @@ class ShippingContainer:
 
     _id_counter = 0
 
-    def __init__(self, size: int, weight: float):
+    def __init__(self, size: int, weight: float, facility: int = 1):
         # size: 1 = 20ft (1 bay), 2 = 40ft (2 bays)
+        # facility: port-stop number (1 = first stop, 2 = second, …)
         ShippingContainer._id_counter += 1
         self.container_id = ShippingContainer._id_counter
         self.size = size
         self.weight = weight
+        self.facility = facility
 
     def __repr__(self) -> str:
         ft = "20ft" if self.size == 1 else "40ft"
-        return f"ShippingContainer(id={self.container_id}, {ft}, {self.weight:.1f}kg)"
+        return f"ShippingContainer(id={self.container_id}, {ft}, {self.weight:.1f}kg, facility={self.facility})"
 
     @classmethod
     def reset_id_counter(cls):

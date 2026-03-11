@@ -8,6 +8,7 @@ Training uses Beam Search (K=5) behavioural cloning.  Smaller ships
 train faster; runtime is ~2 min total for all three.
 """
 
+import argparse
 import json
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 from models import CargoShip
 from solvers.neural_ranker import NeuralRankerSolver
 from solvers.rl_bayesian import RLBayesianSolver
+from solvers.defer import LearnedDeferSolver
 
 MODELS_DIR = Path(__file__).parent / "models"
 MODELS_DIR.mkdir(exist_ok=True)
@@ -91,11 +93,11 @@ def _print_stats(stats: dict) -> None:
         print(f"    samples:        {stats.get('n_samples','?')}  features: {stats.get('n_features','?')}")
 
 
-def pretrain_all():
+def pretrain_all(configs=None):
     total_t0 = time.perf_counter()
     all_stats = {}
 
-    for cfg in CONFIGS:
+    for cfg in (configs if configs is not None else CONFIGS):
         out_path = MODELS_DIR / f"neural_ranker_{cfg['key']}.pkl"
         print(f"\n{'─' * 60}", flush=True)
         print(f"Training: {cfg['label']}", flush=True)
@@ -119,7 +121,7 @@ def pretrain_all():
 
         stats = getattr(solver, "training_stats_", {})
         all_stats[f"neural_ranker_{cfg['key']}"] = stats
-        print(f"  ✓ saved → {out_path}  ({stats.get('elapsed_s', '?')}s)")
+        print(f"  ✓ saved → {out_path}  ({stats.get('elapsed_s', '?')}s)", flush=True)
         _print_stats(stats)
 
     total = time.perf_counter() - total_t0
@@ -177,11 +179,11 @@ RL_CONFIGS = [
 ]
 
 
-def pretrain_rl_bayesian():
+def pretrain_rl_bayesian(configs=None):
     total_t0 = time.perf_counter()
     all_stats = {}
 
-    for cfg in RL_CONFIGS:
+    for cfg in (configs if configs is not None else RL_CONFIGS):
         out_path = MODELS_DIR / f"rl_bayesian_{cfg['key']}.pkl"
         print(f"\n{'─' * 60}", flush=True)
         print(f"Training: {cfg['label']}", flush=True)
@@ -208,7 +210,7 @@ def pretrain_rl_bayesian():
 
         stats = getattr(solver, "training_stats_", {})
         all_stats[f"rl_bayesian_{cfg['key']}"] = stats
-        print(f"  ✓ saved → {out_path}  ({stats.get('elapsed_s', '?')}s)")
+        print(f"  ✓ saved → {out_path}  ({stats.get('elapsed_s', '?')}s)", flush=True)
         _print_stats(stats)
 
     total = time.perf_counter() - total_t0
@@ -220,11 +222,122 @@ def pretrain_rl_bayesian():
     return all_stats
 
 
-if __name__ == "__main__":
-    nr_stats  = pretrain_all()
-    rl_stats  = pretrain_rl_bayesian()
+DEFER_CONFIGS = [
+    {
+        "key":        "coastal",
+        "label":      "Learned Defer — Coastal Feeder  (12 × 9 × 5)",
+        "ship_params": dict(length=12, base_width=5, max_width=9,  height=5,
+                            width_step=1, max_weight=500_000.0),
+        "n_episodes": 300,
+        "n_20ft":     12,
+        "n_40ft":     4,
+        "max_stops":  3,
+    },
+    {
+        "key":        "handymax",
+        "label":      "Learned Defer — Handymax  (24 × 11 × 7)",
+        "ship_params": dict(length=24, base_width=6, max_width=11, height=7,
+                            width_step=1, max_weight=1_500_000.0),
+        "n_episodes": 200,
+        "n_20ft":     35,
+        "n_40ft":     12,
+        "max_stops":  3,
+    },
+    {
+        "key":        "panamax",
+        "label":      "Learned Defer — Panamax  (36 × 13 × 9)",
+        "ship_params": dict(length=36, base_width=7, max_width=13, height=9,
+                            width_step=1, max_weight=3_000_000.0),
+        "n_episodes": 150,
+        "n_20ft":     60,
+        "n_40ft":     25,
+        "max_stops":  3,
+    },
+]
 
-    stats_path = MODELS_DIR / "training_stats.json"
-    with open(stats_path, "w") as fh:
-        json.dump({**nr_stats, **rl_stats}, fh, indent=2)
-    print(f"\n✓ Training stats saved → {stats_path}")
+
+def pretrain_learned_defer(configs=None):
+    total_t0 = time.perf_counter()
+
+    for cfg in (configs if configs is not None else DEFER_CONFIGS):
+        out_path = MODELS_DIR / f"learned_defer_{cfg['key']}.pkl"
+        print(f"\n{'─' * 60}", flush=True)
+        print(f"Training: {cfg['label']}", flush=True)
+        print(f"  episodes={cfg['n_episodes']}  max_stops={cfg['max_stops']}", flush=True)
+        print(f"  containers: {cfg['n_20ft']} × 20 ft  +  {cfg['n_40ft']} × 40 ft", flush=True)
+
+        ship   = CargoShip(**cfg["ship_params"])
+        solver = LearnedDeferSolver(ship)
+        solver.fit(
+            n_episodes  = cfg["n_episodes"],
+            n_20ft      = cfg["n_20ft"],
+            n_40ft      = cfg["n_40ft"],
+            weight_min  = 2_000.0,
+            max_stops   = cfg["max_stops"],
+            seed        = 42,
+            ship_params = cfg["ship_params"],
+        )
+        solver.save(str(out_path))
+
+        print(f"  ✓ saved → {out_path}", flush=True)
+
+    total = time.perf_counter() - total_t0
+    print(f"\n{'─' * 60}")
+    print(f"All Learned Defer models trained in {total:.1f}s", flush=True)
+    print(f"Files in {MODELS_DIR}:")
+    for f in sorted(MODELS_DIR.glob("learned_defer_*.pkl")):
+        print(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Pre-train cargo ship loader ML models.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python pretrain_models.py                          # train all\n"
+            "  python pretrain_models.py --solvers learned_defer  # defer only\n"
+            "  python pretrain_models.py --solvers neural_ranker rl_bayesian\n"
+            "  python pretrain_models.py --ships coastal          # one ship size\n"
+        ),
+    )
+    parser.add_argument(
+        "--solvers", nargs="+",
+        choices=["neural_ranker", "rl_bayesian", "learned_defer"],
+        default=["neural_ranker", "rl_bayesian", "learned_defer"],
+        help="Which solver families to train (default: all)",
+    )
+    parser.add_argument(
+        "--ships", nargs="+",
+        choices=["coastal", "handymax", "panamax"],
+        default=["coastal", "handymax", "panamax"],
+        help="Which ship sizes to train (default: all)",
+    )
+    args = parser.parse_args()
+
+    nr_stats = {}
+    rl_stats = {}
+
+    if "neural_ranker" in args.solvers:
+        cfgs = [c for c in CONFIGS if c["key"] in args.ships]
+        nr_stats = pretrain_all(cfgs)
+
+    if "rl_bayesian" in args.solvers:
+        cfgs = [c for c in RL_CONFIGS if c["key"] in args.ships]
+        rl_stats = pretrain_rl_bayesian(cfgs)
+
+    if "learned_defer" in args.solvers:
+        cfgs = [c for c in DEFER_CONFIGS if c["key"] in args.ships]
+        pretrain_learned_defer(cfgs)
+
+    if nr_stats or rl_stats:
+        stats_path = MODELS_DIR / "training_stats.json"
+        # Merge with existing stats so we don't wipe unrelated entries
+        existing = {}
+        if stats_path.exists():
+            with open(stats_path) as fh:
+                existing = json.load(fh)
+        existing.update({**nr_stats, **rl_stats})
+        with open(stats_path, "w") as fh:
+            json.dump(existing, fh, indent=2)
+        print(f"\n✓ Training stats saved → {stats_path}")

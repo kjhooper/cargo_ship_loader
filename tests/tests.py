@@ -15,6 +15,8 @@ Coverage
 8. Visualizer accumulator  — panel.port_w / fore_w match ship balance functions
 9. Quadrant balance        — quadrant_balance() correctness and greedy diagonal fix
 10. Solver balance         — all solvers achieve >= 0.92 PS and FA ratios
+11. Unloading order        — facility field, _unload_penalty, unloading_score
+12. DeferSolver            — rule-based and learned defer policy correctness
 """
 
 import random
@@ -28,7 +30,7 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 
 from models import CargoShip, ShippingContainer
-from algorithm import CargoLoader
+from algorithm import BaseSolver, CargoLoader
 from visualizer import _ShipPanel
 
 
@@ -772,3 +774,226 @@ class TestSolverBalance:
         solver = RLBayesianSASolver(ship, n_iterations=500, seed=seed)
         solver.load(_make_coastal_containers(seed))
         self._check_balance(ship, "RLBayesianSASolver(greedy warm start)", seed)
+
+
+# ---------------------------------------------------------------------------
+# 11. Unloading order constraint
+# ---------------------------------------------------------------------------
+
+class TestUnloadingConstraint:
+    """Tests for facility field, _unload_penalty, and BaseSolver.unloading_score."""
+
+    def test_facility_field_stored(self):
+        ShippingContainer.reset_id_counter()
+        c = ShippingContainer(size=1, weight=5000, facility=3)
+        assert c.facility == 3
+
+    def test_facility_defaults_to_1(self):
+        ShippingContainer.reset_id_counter()
+        c = ShippingContainer(size=1, weight=5000)
+        assert c.facility == 1
+
+    def test_manifest_carries_facility(self):
+        ship = make_ship()
+        ShippingContainer.reset_id_counter()
+        c = ShippingContainer(size=1, weight=5000, facility=2)
+        manifest = CargoLoader(ship).load([c])
+        placed = [e for e in manifest if e["placed"]]
+        assert len(placed) == 1
+        assert placed[0]["facility"] == 2
+
+    def test_unload_penalty_zero_no_violation(self):
+        """Upper container has earlier facility than lower → no violation."""
+        ship = make_ship()
+        loader = CargoLoader(ship)
+        # Pre-populate manifest: tier=0, facility=2 (later stop)
+        loader.manifest.append({
+            "container_id": 99, "size": 1, "weight": 5000,
+            "facility": 2, "bay": 0, "half": 0, "col": 6, "tier": 0, "placed": True,
+        })
+        ShippingContainer.reset_id_counter()
+        # Place a facility=1 container at tier=1 on top (unloads earlier → no violation)
+        c = ShippingContainer(size=1, weight=5000, facility=1)
+        penalty = loader._unload_penalty(c, bay=0, half=0, col=6, tier=1)
+        assert penalty == pytest.approx(0.0)
+
+    def test_unload_penalty_nonzero_on_violation(self):
+        """Upper container has later facility than lower → violation."""
+        ship = make_ship()
+        loader = CargoLoader(ship)
+        # Pre-populate manifest: tier=0, facility=1 (first stop)
+        loader.manifest.append({
+            "container_id": 99, "size": 1, "weight": 5000,
+            "facility": 1, "bay": 0, "half": 0, "col": 6, "tier": 0, "placed": True,
+        })
+        ShippingContainer.reset_id_counter()
+        # Place a facility=3 container at tier=1 (unloads later → blocks earlier container below)
+        c = ShippingContainer(size=1, weight=5000, facility=3)
+        penalty = loader._unload_penalty(c, bay=0, half=0, col=6, tier=1)
+        assert penalty > 0.0
+
+    def test_unloading_score_perfect(self):
+        """All containers with facility=1 → perfect unloading score."""
+        ship = make_ship()
+        ShippingContainer.reset_id_counter()
+        containers = [ShippingContainer(size=1, weight=5000, facility=1) for _ in range(10)]
+        manifest = CargoLoader(ship).load(containers)
+        score = BaseSolver.unloading_score(manifest)
+        assert score == pytest.approx(1.0)
+
+    def test_unloading_score_detects_violation(self):
+        """Hand-crafted manifest with tier=0 facility=2 and tier=1 facility=3 → score < 1.0."""
+        manifest = [
+            {"container_id": 1, "size": 1, "weight": 5000, "facility": 2,
+             "bay": 0, "half": 0, "col": 6, "tier": 0, "placed": True},
+            {"container_id": 2, "size": 1, "weight": 5000, "facility": 3,
+             "bay": 0, "half": 0, "col": 6, "tier": 1, "placed": True},
+        ]
+        score = BaseSolver.unloading_score(manifest)
+        assert score < 1.0
+
+    def test_scorer_prefers_no_violation(self):
+        """From a state with facility=3 at tier=0, placing facility=1 in the same
+        column (no violation) should score higher than placing in a column where
+        there is already a facility=1 container below (also no violation) vs
+        a column where a facility=1 is below and we place facility=3 (violation)."""
+        ship = make_ship()
+        loader = CargoLoader(ship)
+        # Pre-populate: col=6 tier=0 has facility=1 (lower stop — placing facility=3 above would violate)
+        loader.manifest.append({
+            "container_id": 99, "size": 1, "weight": 5000,
+            "facility": 1, "bay": 0, "half": 0, "col": 6, "tier": 0, "placed": True,
+        })
+        ShippingContainer.reset_id_counter()
+        # facility=3 container: placing above col 6 (violation) vs col 7 (empty, no violation)
+        c = ShippingContainer(size=1, weight=5000, facility=3)
+        score_violation    = loader._score_position(c, bay=0, half=0, col=6, tier=1)
+        score_no_violation = loader._score_position(c, bay=0, half=0, col=7, tier=0)
+        assert score_no_violation > score_violation, (
+            f"Clean column should score higher than violation column; "
+            f"no_viol={score_no_violation:.3f} viol={score_violation:.3f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 12. DeferSolver
+# ---------------------------------------------------------------------------
+
+class TestDeferSolver:
+    """Tests for DeferSolver (rule-based) and LearnedDeferSolver (MLP policy)."""
+
+    def test_defer_solver_places_all_containers(self):
+        """DeferSolver should place at least as many containers as CargoLoader."""
+        from solvers.defer import DeferSolver
+        ship = CargoShip(**COASTAL)
+        ShippingContainer.reset_id_counter()
+        containers = [
+            ShippingContainer(size=1, weight=5000, facility=rng)
+            for rng in ([1, 2, 1, 2, 1, 2, 1, 2, 1, 2] * 3)
+        ]
+        manifest = DeferSolver(ship).load(containers)
+        placed = sum(1 for e in manifest if e["placed"])
+        assert placed == len(containers)
+
+    def test_defer_solver_balance(self):
+        """DeferSolver achieves >= 0.92 PS and FA balance ratios."""
+        from solvers.defer import DeferSolver
+        for seed in [42, 99]:
+            random.seed(seed)
+            ShippingContainer.reset_id_counter()
+            ship = CargoShip(**PANAMAX)
+            containers = [
+                ShippingContainer(
+                    size=random.choice([1, 2]),
+                    weight=round(random.uniform(2000, 30000), 1),
+                    facility=random.randint(1, 3),
+                )
+                for _ in range(80)
+            ]
+            manifest = DeferSolver(ship).load(containers)
+            port_w, stbd_w = ship.port_starboard_balance()
+            fore_w, aft_w  = ship.fore_aft_balance()
+            max_ps = max(port_w, stbd_w)
+            max_fa = max(fore_w, aft_w)
+            ps_ratio = min(port_w, stbd_w) / max_ps if max_ps > 0 else 1.0
+            fa_ratio = min(fore_w, aft_w)  / max_fa if max_fa > 0 else 1.0
+            assert ps_ratio >= 0.92, f"PS ratio {ps_ratio:.3f} too low (seed={seed})"
+            assert fa_ratio >= 0.92, f"FA ratio {fa_ratio:.3f} too low (seed={seed})"
+
+    def test_defer_improves_unloading_score_vs_greedy(self):
+        """On a deliberately conflicting multi-stop manifest, DeferSolver should
+        achieve a higher or equal unloading score compared to greedy CargoLoader."""
+        from solvers.defer import DeferSolver
+        random.seed(7)
+        ShippingContainer.reset_id_counter()
+        ship_greedy = CargoShip(**PANAMAX)
+        ship_defer  = CargoShip(**PANAMAX)
+        # Mix of stops: heavier containers at stop 3 (greedy places them first,
+        # risking them blocking stop-1 containers)
+        containers = []
+        for _ in range(20):
+            containers.append(ShippingContainer(size=1, weight=25000, facility=3))
+        for _ in range(20):
+            containers.append(ShippingContainer(size=1, weight=5000,  facility=1))
+        ShippingContainer.reset_id_counter()
+        containers_a = [ShippingContainer(size=c.size, weight=c.weight, facility=c.facility)
+                        for c in containers]
+        ShippingContainer.reset_id_counter()
+        containers_b = [ShippingContainer(size=c.size, weight=c.weight, facility=c.facility)
+                        for c in containers]
+        greedy_manifest = CargoLoader(ship_greedy).load(containers_a)
+        defer_manifest  = DeferSolver(ship_defer).load(containers_b)
+        greedy_score = BaseSolver.unloading_score(greedy_manifest)
+        defer_score  = BaseSolver.unloading_score(defer_manifest)
+        assert defer_score >= greedy_score, (
+            f"DeferSolver unloading score {defer_score:.3f} < greedy {greedy_score:.3f}"
+        )
+
+    def test_defer_manifest_has_facility_field(self):
+        """Every manifest entry from DeferSolver should carry facility."""
+        from solvers.defer import DeferSolver
+        ShippingContainer.reset_id_counter()
+        ship = CargoShip(**COASTAL)
+        containers = [ShippingContainer(size=1, weight=5000, facility=2) for _ in range(5)]
+        manifest = DeferSolver(ship).load(containers)
+        for entry in manifest:
+            assert "facility" in entry
+            assert entry["facility"] == 2
+
+    def test_max_defers_guarantees_termination(self):
+        """With max_defers=0 DeferSolver never defers — behaves like CargoLoader."""
+        from solvers.defer import DeferSolver
+        ShippingContainer.reset_id_counter()
+        ship_greedy = CargoShip(**COASTAL)
+        ship_defer  = CargoShip(**COASTAL)
+        ShippingContainer.reset_id_counter()
+        containers_a = [ShippingContainer(size=1, weight=5000, facility=i % 3 + 1)
+                        for i in range(15)]
+        ShippingContainer.reset_id_counter()
+        containers_b = [ShippingContainer(size=1, weight=5000, facility=i % 3 + 1)
+                        for i in range(15)]
+        greedy_manifest = CargoLoader(ship_greedy).load(containers_a)
+        defer_manifest  = DeferSolver(ship_defer, max_defers=0).load(containers_b)
+        placed_greedy = sum(1 for e in greedy_manifest if e["placed"])
+        placed_defer  = sum(1 for e in defer_manifest  if e["placed"])
+        assert placed_defer == placed_greedy
+
+    def test_learned_defer_solver_smoke(self):
+        """LearnedDeferSolver trains quickly on a coastal ship and loads containers."""
+        from solvers.defer import LearnedDeferSolver
+        ShippingContainer.reset_id_counter()
+        ship = CargoShip(**COASTAL)
+        solver = LearnedDeferSolver(ship)
+        solver.fit(n_episodes=20, n_20ft=15, n_40ft=5, max_stops=2, seed=42)
+        assert solver._fitted
+        ShippingContainer.reset_id_counter()
+        ship2 = CargoShip(**COASTAL)
+        solver2 = LearnedDeferSolver(ship2)
+        solver2._scaler  = solver._scaler
+        solver2._mlp     = solver._mlp
+        solver2._fitted  = True
+        containers = [ShippingContainer(size=1, weight=5000, facility=random.randint(1, 2))
+                      for _ in range(15)]
+        manifest = solver2.load(containers)
+        placed = sum(1 for e in manifest if e["placed"])
+        assert placed == len(containers)

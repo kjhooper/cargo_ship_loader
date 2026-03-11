@@ -51,7 +51,10 @@ SHIP_PROFILE = {
     "handymax": dict(length=24, beam=11, height=7, keel=6, max_weight="1,500 t"),
     "panamax":  dict(length=36, beam=13, height=9, keel=7, max_weight="3,000 t"),
 }
-SCENARIO_ORDER = ["balanced", "weight_limited", "space_limited", "mixed"]
+SCENARIO_ORDER = [
+    "balanced", "weight_limited", "space_limited", "mixed",
+    "stop_early_heavy", "stop_early_light", "stop_uniform_3", "stop_many",
+]
 ML_SOLVERS = ["neural_ranker", "rl_bayesian"]
 
 CASE_DEFS = {
@@ -95,6 +98,46 @@ CASE_DEFS = {
         "mix": "20 ft + 40 ft",
         "dist": "Bimodal",
     },
+    "stop_early_heavy": {
+        "icon": "🔴",
+        "title": "Early Stop, Heavy",
+        "summary": "2 stops. First-stop containers are heavy (20–28 t); second-stop are light (2–8 t).",
+        "tests": "Worst case: weight-first sorting buries heavy first-stop containers at the bottom — they must come off first but are hardest to reach.",
+        "constraint": "Unloading order conflict with weight-optimal loading.",
+        "weights": "2,000 – 28,000 kg (bimodal by stop)",
+        "mix": "20 ft + 40 ft",
+        "dist": "Stop-stratified",
+    },
+    "stop_early_light": {
+        "icon": "🟢",
+        "title": "Early Stop, Light",
+        "summary": "2 stops. First-stop containers are light (2–8 t); second-stop are heavy (20–28 t).",
+        "tests": "Natural alignment: weight-first sorting places heavy later-stop containers deep; light early-stop ones float to the top automatically.",
+        "constraint": "Unloading order naturally aligned with weight-optimal loading.",
+        "weights": "2,000 – 28,000 kg (bimodal by stop)",
+        "mix": "20 ft + 40 ft",
+        "dist": "Stop-stratified",
+    },
+    "stop_uniform_3": {
+        "icon": "🟡",
+        "title": "Uniform 3 Stops",
+        "summary": "3 port stops, uniform weight distribution across all containers.",
+        "tests": "Moderate complexity: no weight bias — solver must rely on sort order and unloading penalty.",
+        "constraint": "Unloading order with no weight shortcut.",
+        "weights": "2,000 – 28,000 kg (uniform)",
+        "mix": "20 ft + 40 ft",
+        "dist": "Uniform",
+    },
+    "stop_many": {
+        "icon": "🟠",
+        "title": "Many Stops (5)",
+        "summary": "5 port stops, uniform weight distribution.",
+        "tests": "High complexity: five destination buckets multiply ordering conflicts.",
+        "constraint": "Unloading order, high-complexity 5-way interleaving.",
+        "weights": "2,000 – 28,000 kg (uniform)",
+        "mix": "20 ft + 40 ft",
+        "dist": "Uniform",
+    },
 }
 
 SOLVER_COLORS = {
@@ -112,10 +155,54 @@ SHIP_COLORS = {
     "panamax":  "#f59e0b",
 }
 SCENARIO_COLORS = {
-    "balanced":       "#60a5fa",
-    "weight_limited": "#f87171",
-    "space_limited":  "#34d399",
-    "mixed":          "#f59e0b",
+    "balanced":         "#60a5fa",
+    "weight_limited":   "#f87171",
+    "space_limited":    "#34d399",
+    "mixed":            "#f59e0b",
+    "stop_early_heavy": "#fb7185",
+    "stop_early_light": "#4ade80",
+    "stop_uniform_3":   "#fbbf24",
+    "stop_many":        "#c084fc",
+}
+
+UNLOADING_SCENARIO_ORDER = [
+    "stop_early_heavy", "stop_early_light", "stop_uniform_3", "stop_many",
+]
+UNLOADING_CASE_DEFS = {
+    "stop_early_heavy": {
+        "icon": "🔴",
+        "title": "Early Stop, Heavy",
+        "summary": "First-stop containers are heavy (20–28 t); second-stop containers are light (2–8 t).",
+        "tests": "Worst case: weight-first sorting buries heavy first-stop containers at the bottom — they must come off first but are hardest to reach.",
+        "stops": 2, "stop1_kg": "20,000–28,000", "stop2_kg": "2,000–8,000",
+    },
+    "stop_early_light": {
+        "icon": "🟢",
+        "title": "Early Stop, Light",
+        "summary": "First-stop containers are light (2–8 t); second-stop containers are heavy (20–28 t).",
+        "tests": "Natural alignment: weight-first sorting places heavy later-stop containers deep; light early-stop ones float to the top automatically.",
+        "stops": 2, "stop1_kg": "2,000–8,000", "stop2_kg": "20,000–28,000",
+    },
+    "stop_uniform_3": {
+        "icon": "🟡",
+        "title": "Uniform 3 Stops",
+        "summary": "3 port stops, uniform weight distribution across all containers.",
+        "tests": "Moderate complexity: no weight bias to exploit — solver must rely on sort order and the unloading penalty to achieve good stacking.",
+        "stops": 3, "stop1_kg": "2,000–28,000 (all)", "stop2_kg": "—",
+    },
+    "stop_many": {
+        "icon": "🟠",
+        "title": "Many Stops (5)",
+        "summary": "5 port stops, uniform weight distribution.",
+        "tests": "High complexity: five destination buckets multiply ordering conflicts and make rehandling harder to avoid.",
+        "stops": 5, "stop1_kg": "2,000–28,000 (all)", "stop2_kg": "—",
+    },
+}
+UNLOADING_SCENARIO_COLORS = {
+    "stop_early_heavy": "#f87171",
+    "stop_early_light": "#34d399",
+    "stop_uniform_3":   "#f59e0b",
+    "stop_many":        "#a78bfa",
 }
 
 _DARK = dict(template="plotly_dark", paper_bgcolor="#0f172a", plot_bgcolor="#1e293b")
@@ -902,6 +989,250 @@ def plot_transfer_pair(df_tr: pd.DataFrame, solver_name: str) -> tuple:
     return fig_score, fig_deg, sorted(significant, key=lambda x: x[3])
 
 
+# ── Unloading Order plots ──────────────────────────────────────────────────────
+
+def _ul_col_labels(scenarios: list) -> list:
+    return [
+        f"{UNLOADING_CASE_DEFS.get(s, {}).get('icon', '')} "
+        f"{UNLOADING_CASE_DEFS.get(s, {}).get('title', s)}"
+        for s in scenarios
+    ]
+
+
+@st.cache_data(show_spinner=False)
+def plot_rehandles_heatmap(df_ul: pd.DataFrame, ships: tuple, solvers: tuple) -> go.Figure:
+    """Avg rehandles per container — solver × scenario. Lower = better."""
+    sub = _filter(df_ul, list(ships), list(solvers))
+    if sub.empty or "avg_rehandles" not in sub.columns:
+        return go.Figure()
+    sc = [s for s in UNLOADING_SCENARIO_ORDER if s in sub["scenario"].unique()]
+    sv = [s for s in SOLVER_ORDER if s in solvers and s in sub["solver_name"].unique()]
+    g = sub.groupby(["solver_name", "scenario"])["avg_rehandles"].mean()
+    z, text = [], []
+    for solver in sv:
+        rz, rt = [], []
+        for scenario in sc:
+            v = g.get((solver, scenario), np.nan)
+            rz.append(v)
+            rt.append(f"{v:.2f}" if not np.isnan(v) else "—")
+        z.append(rz); text.append(rt)
+    z_arr = np.array(z, dtype=float)
+    zmax = max(float(np.nanmax(z_arr)), 0.1) if not np.all(np.isnan(z_arr)) else 1.0
+    return _heatmap(
+        z_arr, _ul_col_labels(sc),
+        [SOLVER_DISPLAY.get(s, s) for s in sv],
+        text,
+        "Avg Rehandles per Container  (lower = better unloading order)",
+        "RdYlGn_r", 0.0, zmax,
+        colorbar_title="Avg rehandles",
+        height=max(280, 60 + 42 * len(sv)),
+    )
+
+
+@st.cache_data(show_spinner=False)
+def plot_unload_score_heatmap(df_ul: pd.DataFrame, ships: tuple, solvers: tuple) -> go.Figure:
+    """Unloading score heatmap — solver × scenario. Higher = better."""
+    sub = _filter(df_ul, list(ships), list(solvers))
+    if sub.empty or "unloading_score" not in sub.columns:
+        return go.Figure()
+    sc = [s for s in UNLOADING_SCENARIO_ORDER if s in sub["scenario"].unique()]
+    sv = [s for s in SOLVER_ORDER if s in solvers and s in sub["solver_name"].unique()]
+    g = sub.groupby(["solver_name", "scenario"])["unloading_score"].mean()
+    z, text = [], []
+    for solver in sv:
+        rz, rt = [], []
+        for scenario in sc:
+            v = g.get((solver, scenario), np.nan)
+            rz.append(v)
+            rt.append(f"{v:.3f}" if not np.isnan(v) else "—")
+        z.append(rz); text.append(rt)
+    return _heatmap(
+        np.array(z, dtype=float), _ul_col_labels(sc),
+        [SOLVER_DISPLAY.get(s, s) for s in sv],
+        text,
+        "Unloading Score  (fraction of correctly-ordered stacked pairs — higher = better)",
+        "RdYlGn", 0.5, 1.0,
+        colorbar_title="Score",
+        height=max(280, 60 + 42 * len(sv)),
+    )
+
+
+@st.cache_data(show_spinner=False)
+def plot_conflict_vs_alignment(df_ul: pd.DataFrame, ships: tuple, solvers: tuple) -> go.Figure:
+    """Grouped bars: early-heavy (conflict) vs early-light (alignment), per solver."""
+    sub = _filter(df_ul, list(ships), list(solvers))
+    if sub.empty or "avg_rehandles" not in sub.columns:
+        return go.Figure()
+    compare = ["stop_early_heavy", "stop_early_light"]
+    sub = sub[sub["scenario"].isin(compare)]
+    if sub.empty:
+        return go.Figure()
+    agg = sub.groupby(["solver_name", "scenario"])["avg_rehandles"].mean().reset_index()
+    sv = [s for s in SOLVER_ORDER if s in solvers and s in agg["solver_name"].unique()]
+    fig = go.Figure()
+    for scenario in compare:
+        d = UNLOADING_CASE_DEFS.get(scenario, {})
+        rows = agg[agg["scenario"] == scenario].copy()
+        rows = rows.set_index("solver_name").reindex(
+            [s for s in sv if s in rows["solver_name"].values]
+        ).reset_index()
+        fig.add_trace(go.Bar(
+            name=f"{d.get('icon', '')} {d.get('title', scenario)}",
+            x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
+            y=rows["avg_rehandles"],
+            marker_color=UNLOADING_SCENARIO_COLORS.get(scenario, "#aaa"),
+            text=[f"{v:.2f}" if not pd.isna(v) else "—" for v in rows["avg_rehandles"]],
+            textposition="outside",
+            hovertemplate=(
+                f"<b>{d.get('title', scenario)}</b><br>"
+                "%{x}: %{y:.3f} avg rehandles<extra></extra>"
+            ),
+        ))
+    fig.update_layout(
+        barmode="group",
+        title=dict(
+            text="Conflict vs Alignment — Avg Rehandles per Container",
+            font=dict(size=13),
+        ),
+        yaxis=dict(title="Avg rehandles per container", rangemode="tozero"),
+        height=360, margin=dict(l=60, r=20, t=68, b=65),
+        legend=dict(**_LEG_H, title_text="Scenario"),
+        **_DARK,
+    )
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def plot_stop_balance_chart(
+    df_ul: pd.DataFrame,
+    ships: tuple,
+    solvers: tuple,
+    scenario: str,
+) -> go.Figure:
+    """Line chart: PS / FA / Diag balance ratios after each port stop is completed."""
+    sub = _filter(df_ul, list(ships), list(solvers))
+    sub = sub[sub["scenario"] == scenario]
+    if sub.empty or "post_stop_balance" not in sub.columns:
+        return go.Figure()
+
+    rows = []
+    for _, rec in sub.iterrows():
+        psb = rec["post_stop_balance"]
+        if not isinstance(psb, list):
+            continue
+        for entry in psb:
+            rows.append({"solver_name": rec["solver_name"], **entry})
+    if not rows:
+        return go.Figure()
+
+    exp = pd.DataFrame(rows)
+    agg = (
+        exp.groupby(["solver_name", "stop_completed"])[["ps_ratio", "fa_ratio", "diag_ratio"]]
+        .mean()
+        .reset_index()
+    )
+
+    metrics = [
+        ("ps_ratio",   "PS",   "solid"),
+        ("fa_ratio",   "FA",   "dash"),
+        ("diag_ratio", "Diag", "dot"),
+    ]
+    fig = go.Figure()
+    present_solvers = [s for s in SOLVER_ORDER if s in agg["solver_name"].unique()]
+    for solver in present_solvers:
+        d = agg[agg["solver_name"] == solver].sort_values("stop_completed")
+        color = SOLVER_COLORS.get(solver, "#aaa")
+        display = SOLVER_DISPLAY.get(solver, solver)
+        for col, label, dash in metrics:
+            fig.add_trace(go.Scatter(
+                x=d["stop_completed"],
+                y=d[col],
+                mode="lines+markers",
+                name=f"{display} — {label}",
+                line=dict(color=color, dash=dash, width=2),
+                marker=dict(size=6),
+                hovertemplate=(
+                    f"<b>{display} — {label}</b><br>"
+                    "After stop %{x}: %{y:.4f}<extra></extra>"
+                ),
+            ))
+
+    fig.update_layout(
+        title=dict(text="Balance Ratios After Each Port Stop", font=dict(size=13)),
+        xaxis=dict(title="Stop completed", dtick=1),
+        yaxis=dict(title="Balance ratio", range=[0.5, 1.02]),
+        height=420,
+        margin=dict(l=60, r=200, t=50, b=55),
+        legend=dict(**_LEG_V, title_text="Solver — Metric"),
+        **_DARK,
+    )
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def plot_stop_rehandles_chart(
+    df_ul: pd.DataFrame,
+    ships: tuple,
+    solvers: tuple,
+    scenario: str,
+) -> go.Figure:
+    """Bar chart: rehandles_at_stop per stop, averaged across seeds and ships."""
+    sub = _filter(df_ul, list(ships), list(solvers))
+    sub = sub[sub["scenario"] == scenario]
+    if sub.empty or "post_stop_balance" not in sub.columns:
+        return go.Figure()
+
+    rows = []
+    for _, rec in sub.iterrows():
+        psb = rec["post_stop_balance"]
+        if not isinstance(psb, list):
+            continue
+        for entry in psb:
+            if "rehandles_at_stop" not in entry:
+                continue
+            rows.append({
+                "solver_name":      rec["solver_name"],
+                "stop_completed":   entry["stop_completed"],
+                "rehandles_at_stop": entry["rehandles_at_stop"],
+            })
+    if not rows:
+        return go.Figure()
+
+    exp = pd.DataFrame(rows)
+    agg = (
+        exp.groupby(["solver_name", "stop_completed"])["rehandles_at_stop"]
+        .mean()
+        .reset_index()
+    )
+
+    fig = go.Figure()
+    present_solvers = [s for s in SOLVER_ORDER if s in agg["solver_name"].unique()]
+    for solver in present_solvers:
+        d = agg[agg["solver_name"] == solver].sort_values("stop_completed")
+        fig.add_trace(go.Bar(
+            name=SOLVER_DISPLAY.get(solver, solver),
+            x=d["stop_completed"],
+            y=d["rehandles_at_stop"],
+            marker_color=SOLVER_COLORS.get(solver, "#aaa"),
+            hovertemplate=(
+                f"<b>{SOLVER_DISPLAY.get(solver, solver)}</b><br>"
+                "Stop %{x}: %{y:.1f} rehandles<extra></extra>"
+            ),
+        ))
+
+    fig.update_layout(
+        title=dict(text="Rehandles Required at Each Port Stop", font=dict(size=13)),
+        xaxis=dict(title="Stop completed", dtick=1),
+        yaxis=dict(title="Avg rehandles at stop", rangemode="tozero"),
+        barmode="group",
+        height=340,
+        margin=dict(l=60, r=200, t=50, b=55),
+        legend=dict(**_LEG_V, title_text="Solver"),
+        **_DARK,
+    )
+    return fig
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Page layout
 # ══════════════════════════════════════════════════════════════════════════════
@@ -924,7 +1255,9 @@ if data is None:
 
 df_std = _df(data.get("standard", []))
 df_tr  = _df(data.get("transfer", []))
-has_transfer = not df_tr.empty
+df_ul  = _df(data.get("unloading", []))
+has_transfer  = not df_tr.empty
+has_unloading = not df_ul.empty
 
 if df_std.empty:
     st.error("benchmark_results.json was loaded but contains no standard results.")
@@ -991,11 +1324,12 @@ with st.sidebar:
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_ov, tab_case, tab_ship, tab_flex, tab_raw = st.tabs([
+tab_ov, tab_case, tab_ship, tab_flex, tab_unload, tab_raw = st.tabs([
     "🗺 Overview",
     "📋 Case Level",
     "🚢 Ship Level",
     "🔀 Flexibility",
+    "⚓ Unloading Order",
     "🗄 Raw Data",
 ])
 
@@ -1262,6 +1596,194 @@ with tab_flex:
                         for sh, mo, sc, dl in sigs
                     )
                 )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Unloading Order
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_unload:
+    st.subheader("Unloading Order Analysis")
+    st.caption(
+        "How well does each solver stack containers in the correct unloading order? "
+        "Each scenario stress-tests a different alignment between weight and port stop."
+    )
+
+    if not has_unloading:
+        st.info(
+            "**No unloading benchmark data found.**\n\n"
+            "Generate it with:\n"
+            "```\nconda run -n personal python benchmark.py\n```\n\n"
+            "To run only unloading scenarios (faster):\n"
+            "```\nconda run -n personal python benchmark.py "
+            "--ships coastal --no-transfer\n```"
+        )
+    else:
+        # ── Scenario definition cards ──────────────────────────────────────
+        st.markdown("#### Scenario Definitions")
+        card_cols = st.columns(4)
+        for col, sc_key in zip(card_cols, UNLOADING_SCENARIO_ORDER):
+            d = UNLOADING_CASE_DEFS.get(sc_key, {})
+            colour = UNLOADING_SCENARIO_COLORS.get(sc_key, "#aaa")
+            with col:
+                st.markdown(
+                    f"<div style='border-left: 4px solid {colour}; padding: 8px 12px; "
+                    f"background: rgba(30,41,59,0.7); border-radius: 4px; margin-bottom: 8px;'>"
+                    f"<b>{d.get('icon', '')} {d.get('title', sc_key)}</b><br>"
+                    f"<span style='font-size:0.82em; color:#94a3b8;'>{d.get('summary', '')}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Details"):
+                    st.caption(f"**Tests:** {d.get('tests', '—')}")
+                    st.caption(f"**Port stops:** {d.get('stops', '?')}")
+                    stop1 = d.get("stop1_kg", "—")
+                    stop2 = d.get("stop2_kg", "—")
+                    if stop2 != "—":
+                        st.caption(f"**Stop 1 weights:** {stop1} kg")
+                        st.caption(f"**Stop 2+ weights:** {stop2} kg")
+                    else:
+                        st.caption(f"**All weights:** {stop1} kg")
+
+        st.divider()
+
+        # ── Metric explanation ─────────────────────────────────────────────
+        with st.expander("ℹ️ How the metrics are calculated", expanded=False):
+            st.markdown(
+                "**Avg rehandles per container** *(primary metric, lower = better)*\n\n"
+                "Simulates unloading stop-by-stop. At each stop, for every container "
+                "being unloaded, count all containers above it in the same column that "
+                "are still aboard and going to a *later* stop — those must be temporarily "
+                "moved aside. Divide total moves by containers placed.\n\n"
+                "> **Note:** containers going to the *same* stop do not count as rehandles — "
+                "they unload together at that stop and come off first without extra moves.\n\n"
+                "**Unloading score** *(secondary metric, higher = better)*\n\n"
+                "Fraction of stacked container pairs (same column, overlapping bays) "
+                "where the upper container unloads at the same or earlier port than "
+                "the lower one. Score = 1.0 means every pair is correctly ordered."
+            )
+
+        # ── Primary heatmaps — both pre-built and cached, toggled by radio ────
+        # Build both figures now (cache_data ensures this is O(1) on subsequent
+        # runs with the same inputs — no algorithm re-runs, just a cache lookup).
+        _ships_t   = tuple(sel_ships)
+        _solvers_t = tuple(sel_solvers)
+        fig_rehandles = plot_rehandles_heatmap(df_ul, _ships_t, _solvers_t)
+        fig_unload_sc = plot_unload_score_heatmap(df_ul, _ships_t, _solvers_t)
+
+        heatmap_view = st.radio(
+            "Heatmap",
+            ["Avg Rehandles", "Unloading Score"],
+            horizontal=True,
+            key="ul_heatmap_view",
+        )
+        if heatmap_view == "Avg Rehandles":
+            st.plotly_chart(fig_rehandles, use_container_width=True)
+            st.caption(
+                "Mean avg rehandles per container across ships and seeds. "
+                "**Green = fewer rehandles = better.** 0.0 = perfect ordering."
+            )
+        else:
+            st.plotly_chart(fig_unload_sc, use_container_width=True)
+            st.caption(
+                "Fraction of correctly-ordered stacked pairs. "
+                "**Green = more pairs in correct order = better.** 1.000 = no violations."
+            )
+
+        st.divider()
+
+        # ── Conflict vs Alignment comparison ──────────────────────────────
+        st.markdown("#### Conflict vs Alignment — Does weight bias help or hurt?")
+        st.caption(
+            "Compares the hardest case (🔴 early-stop containers are heavy — "
+            "weight-first sort fights unloading order) against the easiest "
+            "(🟢 early-stop containers are light — weight-first sort naturally "
+            "aligns with unloading order). Gap = cost of the conflict."
+        )
+        fig_cva = plot_conflict_vs_alignment(df_ul, _ships_t, _solvers_t)
+        if fig_cva.data:
+            st.plotly_chart(fig_cva, use_container_width=True)
+            st.caption(
+                "Smaller gap between 🔴 and 🟢 bars = solver is better at "
+                "overcoming the weight-vs-order conflict."
+            )
+        else:
+            st.info("Both early-stop scenarios need data to show this chart.")
+
+        # ── Balance after each port stop ───────────────────────────────────
+        st.divider()
+        st.subheader("Balance After Each Port Stop")
+        st.caption(
+            "Balance ratios (PS / FA / Diagonal) measured on the cargo that remains "
+            "aboard after each port stop. A ship must stay balanced throughout the "
+            "voyage, not just at departure."
+        )
+        _ul_filtered = _filter(df_ul, sel_ships, sel_solvers)
+        _ul_scenarios_present = [
+            s for s in UNLOADING_SCENARIO_ORDER
+            if not _ul_filtered.empty and s in _ul_filtered["scenario"].unique()
+        ]
+        if _ul_scenarios_present:
+            scenario_sel = st.selectbox(
+                "Scenario",
+                options=_ul_scenarios_present,
+                format_func=lambda s: (
+                    f"{UNLOADING_CASE_DEFS[s]['icon']} {UNLOADING_CASE_DEFS[s]['title']}"
+                ),
+                key="ul_stop_balance_scenario",
+            )
+            if scenario_sel:
+                fig_sb = plot_stop_balance_chart(
+                    df_ul, _ships_t, _solvers_t, scenario_sel
+                )
+                fig_sr = plot_stop_rehandles_chart(
+                    df_ul, _ships_t, _solvers_t, scenario_sel
+                )
+                if fig_sb.data:
+                    st.plotly_chart(fig_sb, use_container_width=True)
+                    st.caption(
+                        "Solid = PS ratio · Dashed = FA ratio · Dotted = Diagonal ratio. "
+                        "Each point is the mean across selected ships and seeds."
+                    )
+                if fig_sr.data:
+                    st.plotly_chart(fig_sr, use_container_width=True)
+                    st.caption(
+                        "Number of containers that must be moved aside at each stop to "
+                        "access targets. Only containers staying aboard longer count. "
+                        "Mean across selected ships and seeds."
+                    )
+                if not fig_sb.data and not fig_sr.data:
+                    st.info(
+                        "No per-stop balance data for this scenario. "
+                        "Re-run benchmarks to populate."
+                    )
+        else:
+            st.info("No unloading scenario data available.")
+
+        # ── Raw unloading table ────────────────────────────────────────────
+        st.divider()
+        st.markdown("#### Raw Unloading Results")
+        ul_raw = _filter(df_ul, sel_ships, sel_solvers)
+        ul_show_cols = [
+            c for c in [
+                "ship_key", "scenario", "solver_name", "seed",
+                "unloading_score", "avg_rehandles", "rehandle_count",
+                "placed", "final_score", "runtime_s",
+            ] if c in ul_raw.columns
+        ]
+        if not ul_raw.empty and ul_show_cols:
+            style = ul_raw[ul_show_cols].sort_values(
+                ["ship_key", "scenario", "solver_name", "seed"]
+            ).reset_index(drop=True)
+            gradient_cols = [c for c in ["unloading_score", "final_score"] if c in style.columns]
+            st.dataframe(
+                style.style.background_gradient(
+                    subset=gradient_cols, cmap="RdYlGn", vmin=0.5, vmax=1.0
+                ) if gradient_cols else style,
+                use_container_width=True,
+                height=380,
+            )
+            st.caption(f"{len(ul_raw)} rows shown.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Raw Data

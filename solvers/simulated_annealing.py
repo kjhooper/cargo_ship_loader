@@ -57,6 +57,7 @@ class SimulatedAnnealingSolver(BaseSolver):
         k_list: float      = 4.0,
         k_diag: float      = 6.0,
         k_stacking: float  = 0.5,
+        k_unload: float    = 2.0,
     ):
         super().__init__(ship)
         self.n_iterations = n_iterations
@@ -68,6 +69,7 @@ class SimulatedAnnealingSolver(BaseSolver):
         self.k_list       = k_list
         self.k_diag       = k_diag
         self.k_stacking   = k_stacking
+        self.k_unload     = k_unload
         self.manifest: List[Dict] = []
 
     # ------------------------------------------------------------------
@@ -171,6 +173,7 @@ class SimulatedAnnealingSolver(BaseSolver):
                 "container_id": original_entry["container_id"],
                 "size":   size,
                 "weight": weight,
+                "facility": original_entry["facility"],
                 "bay":    new_bay,
                 "half":   new_half,
                 "col":    new_col,
@@ -208,7 +211,7 @@ class SimulatedAnnealingSolver(BaseSolver):
             self.ship,
             k_gz=self.k_gz, k_trim=self.k_trim,
             k_list=self.k_list, k_diag=self.k_diag,
-            k_stacking=self.k_stacking,
+            k_stacking=self.k_stacking, k_unload=self.k_unload,
         )
         self.manifest = loader.load(containers)
 
