@@ -15,16 +15,18 @@ conda run -n personal python benchmark.py --no-color
 """
 
 import argparse
+import os
 import random
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
-from algorithm import CargoLoader
+from algorithm import BaseSolver, CargoLoader
 from models import CargoShip, ShippingContainer
 
 # ---------------------------------------------------------------------------
@@ -61,6 +63,12 @@ try:
 except ImportError:
     _RL_SA_OK = False
 
+try:
+    from solvers import LearnedDeferSolver, DeferSolver
+    _DEFER_OK = True
+except ImportError:
+    _DEFER_OK = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -77,14 +85,26 @@ SHIP_DEFAULTS = {
     "panamax":  dict(default_20ft=60,  default_40ft=25),
 }
 
-SOLVERS   = ["greedy", "beam_search", "simulated_annealing", "bayesian_opt", "neural_ranker", "rl_bayesian", "rl_bayesian_sa"]
+SOLVERS   = ["greedy", "beam_search", "simulated_annealing", "bayesian_opt", "neural_ranker", "rl_bayesian", "rl_bayesian_sa", "defer", "learned_defer"]
 SCENARIOS = ["balanced", "weight_limited", "space_limited", "mixed"]
 SEEDS     = [42, 99, 7]
 
+# Scenarios specifically designed to stress-test the unloading order constraint.
+# Each assigns containers to 2–5 port stops with deliberate weight distributions.
+UNLOADING_SCENARIOS = [
+    "stop_early_heavy",   # stop-1 containers are heavy → direct conflict with weight-first sort
+    "stop_early_light",   # stop-1 containers are light → weight-first naturally satisfies order
+    "stop_uniform_3",     # 3 stops, uniform weights   → no weight pattern to exploit
+    "stop_many",          # 5 stops, uniform weights   → high-complexity ordering
+]
+
 MODELS_DIR = Path(__file__).parent / "models"
 
+# Increment when algorithm logic changes and all benchmarks should re-run
+ALGO_VERSION = "0.3.0"
+
 # ML solvers that support cross-ship transfer tests
-ML_SOLVERS = ["neural_ranker", "rl_bayesian"]
+ML_SOLVERS = ["neural_ranker", "rl_bayesian", "learned_defer"]
 
 # All 9 ship × model combos for transfer tests
 TRANSFER_COMBOS = [
@@ -123,11 +143,18 @@ class BenchmarkResult:
     total:           int   = 0
     weight_loaded:   float = 0.0   # total cargo weight placed (kg)
     cog_height_norm: float = 0.0   # normalised centre-of-gravity height [0, 1]
-    runtime_s:       float = 0.0
-    error:           Optional[str] = None
+    unloading_score:  float = 1.0   # fraction of stacked pairs in correct order [0, 1]
+    rehandle_count:   int   = 0     # total moves needed across all stops
+    post_stop_balance: List[Dict] = field(default_factory=list)
+    runtime_s:        float = 0.0
+    error:            Optional[str] = None
 
     def to_dict(self) -> dict:
+        avg_rehandles = (
+            round(self.rehandle_count / self.placed, 4) if self.placed else 0.0
+        )
         return {
+            "algo_version":    ALGO_VERSION,
             "ship_key":        self.config.ship_key,
             "scenario":        self.config.scenario,
             "solver_name":     self.config.solver_name,
@@ -143,8 +170,12 @@ class BenchmarkResult:
             "pct_placed":      round(100.0 * self.placed / self.total, 2) if self.total else 0.0,
             "weight_loaded":   round(self.weight_loaded,   1),
             "cog_height_norm": round(self.cog_height_norm, 6),
-            "runtime_s":       round(self.runtime_s,       4),
-            "error":           self.error,
+            "unloading_score": round(self.unloading_score, 6),
+            "rehandle_count":    self.rehandle_count,
+            "avg_rehandles":     avg_rehandles,
+            "post_stop_balance": self.post_stop_balance,
+            "runtime_s":         round(self.runtime_s,       4),
+            "error":             self.error,
         }
 
 
@@ -157,6 +188,47 @@ class _SolverSkip(Exception):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+# ---------------------------------------------------------------------------
+# Caching helpers
+# ---------------------------------------------------------------------------
+
+def _load_existing_results(path: Path) -> dict:
+    """Load benchmark_results.json if present; return empty section lists otherwise.
+
+    Backfills 'algo_version': '0.2.0' on any record that predates versioning so that
+    existing benchmark data is preserved without re-running.
+    """
+    import json
+    if not path.exists() or path.stat().st_size == 0:
+        return {"standard": [], "transfer": [], "unloading": []}
+    with open(path) as fh:
+        try:
+            data = json.load(fh)
+        except json.JSONDecodeError:
+            print(f"Warning: {path} is corrupt — starting fresh.", flush=True)
+            return {"standard": [], "transfer": [], "unloading": []}
+
+    def _backfill(records: list) -> list:
+        for r in records:
+            r.setdefault("algo_version", "0.2.0")
+        return records
+
+    return {
+        "standard":  _backfill(data.get("standard",  [])),
+        "transfer":  _backfill(data.get("transfer",  [])),
+        "unloading": _backfill(data.get("unloading", [])),
+    }
+
+
+def _done_keys(records: list) -> set:
+    """Return the set of config keys already completed for the current ALGO_VERSION."""
+    return {
+        (r["ship_key"], r["scenario"], r["solver_name"], r["model_key"], r["seed"])
+        for r in records
+        if r.get("algo_version") == ALGO_VERSION
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +272,88 @@ def _scenario_containers(
         n20, n40    = 3 * n20_def, n40_def
         w_min, w_max = 500.0, 30_000.0
         dist = "bimodal"
+
+    # ── Unloading-order stress scenarios ───────────────────────────────────────
+    # These scenarios assign containers to port stops with deliberate weight
+    # distributions to expose conflicts between weight-optimal loading and
+    # correct port-stop unloading order.
+
+    elif scenario == "stop_early_heavy":
+        # 2 stops.  Stop-1 containers are heavy, stop-2 are light.
+        # Maximum conflict: greedy heavy-first buries stop-1 containers at the
+        # bottom, but they must come off first — requiring many rehandles.
+        n20, n40     = n20_def, n40_def
+        ShippingContainer.reset_id_counter()
+        containers: List[ShippingContainer] = []
+        for _ in range(n20):
+            stop = rng.randint(1, 2)
+            w = round(rng.uniform(20_000.0, 28_000.0) if stop == 1
+                      else rng.uniform(2_000.0, 8_000.0), 1)
+            containers.append(ShippingContainer(size=1, weight=w, facility=stop))
+        for _ in range(n40):
+            stop = rng.randint(1, 2)
+            w = round(rng.uniform(20_000.0, 28_000.0) if stop == 1
+                      else rng.uniform(2_000.0, 8_000.0), 1)
+            containers.append(ShippingContainer(size=2, weight=w, facility=stop))
+        rng.shuffle(containers)
+        return containers
+
+    elif scenario == "stop_early_light":
+        # 2 stops.  Stop-1 containers are light, stop-2 are heavy.
+        # Natural alignment: greedy heavy-first places stop-2 containers deep
+        # and stop-1 containers on top — unloading order is satisfied for free.
+        # Measures how much headroom exists vs the hard case.
+        n20, n40     = n20_def, n40_def
+        ShippingContainer.reset_id_counter()
+        containers = []
+        for _ in range(n20):
+            stop = rng.randint(1, 2)
+            w = round(rng.uniform(2_000.0, 8_000.0) if stop == 1
+                      else rng.uniform(20_000.0, 28_000.0), 1)
+            containers.append(ShippingContainer(size=1, weight=w, facility=stop))
+        for _ in range(n40):
+            stop = rng.randint(1, 2)
+            w = round(rng.uniform(2_000.0, 8_000.0) if stop == 1
+                      else rng.uniform(20_000.0, 28_000.0), 1)
+            containers.append(ShippingContainer(size=2, weight=w, facility=stop))
+        rng.shuffle(containers)
+        return containers
+
+    elif scenario == "stop_uniform_3":
+        # 3 stops, uniform weight distribution across all stops.
+        # No systematic weight pattern to exploit; tests the unloading-order
+        # penalty in isolation without a weight-based shortcut.
+        n20, n40     = n20_def, n40_def
+        ShippingContainer.reset_id_counter()
+        containers = []
+        for _ in range(n20):
+            stop = rng.randint(1, 3)
+            w = round(rng.uniform(2_000.0, 28_000.0), 1)
+            containers.append(ShippingContainer(size=1, weight=w, facility=stop))
+        for _ in range(n40):
+            stop = rng.randint(1, 3)
+            w = round(rng.uniform(2_000.0, 28_000.0), 1)
+            containers.append(ShippingContainer(size=2, weight=w, facility=stop))
+        rng.shuffle(containers)
+        return containers
+
+    elif scenario == "stop_many":
+        # 5 stops, uniform weight distribution.
+        # High-complexity ordering challenge: the solver must resolve a 5-way
+        # interleaving of port-stop constraints alongside balance.
+        n20, n40     = n20_def, n40_def
+        ShippingContainer.reset_id_counter()
+        containers = []
+        for _ in range(n20):
+            stop = rng.randint(1, 5)
+            w = round(rng.uniform(2_000.0, 28_000.0), 1)
+            containers.append(ShippingContainer(size=1, weight=w, facility=stop))
+        for _ in range(n40):
+            stop = rng.randint(1, 5)
+            w = round(rng.uniform(2_000.0, 28_000.0), 1)
+            containers.append(ShippingContainer(size=2, weight=w, facility=stop))
+        rng.shuffle(containers)
+        return containers
 
     else:
         raise ValueError(f"Unknown scenario: {scenario!r}")
@@ -293,6 +447,23 @@ def _create_solver(solver_name: str, ship: CargoShip, model_key: str):
             model_path=str(path) if path.exists() else None,
         )
 
+    if solver_name == "defer":
+        if not _DEFER_OK:
+            raise _SolverSkip("IMPORT_ERROR")
+        return DeferSolver(ship)
+
+    if solver_name == "learned_defer":
+        if not _DEFER_OK:
+            raise _SolverSkip("IMPORT_ERROR")
+        path = MODELS_DIR / f"learned_defer_{model_key}.pkl"
+        if not path.exists():
+            raise _SolverSkip("MISSING_PKL")
+        dummy = CargoShip(length=36, base_width=7, max_width=13,
+                          height=9, width_step=1, max_weight=50_000.0)
+        solver = LearnedDeferSolver.load_model(dummy, str(path))
+        solver.ship = ship
+        return solver
+
     raise ValueError(f"Unknown solver: {solver_name!r}")
 
 
@@ -336,6 +507,12 @@ def _run_one(config: BenchmarkConfig) -> BenchmarkResult:
         if placed_entries and ship.height > 1 and ship.total_weight > 0:
             gz_sum = sum(e["weight"] * e["tier"] for e in placed_entries)
             result.cog_height_norm = gz_sum / (ship.total_weight * (ship.height - 1))
+
+        result.unloading_score = BaseSolver.unloading_score(manifest)
+        result.rehandle_count  = BaseSolver.rehandle_count(manifest)
+        result.post_stop_balance = BaseSolver.per_stop_balance(
+            manifest, ship.length, ship.width
+        )
 
     except _SolverSkip as exc:
         result.error = exc.code
@@ -526,6 +703,130 @@ def print_transfer_table(results: List[BenchmarkResult]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Unloading benchmark table
+# ---------------------------------------------------------------------------
+
+UNLOADING_CASE_LABELS = {
+    "stop_early_heavy": "EarlyHeavy (hard)",
+    "stop_early_light": "EarlyLight (easy)",
+    "stop_uniform_3":   "Uniform-3stop",
+    "stop_many":        "Uniform-5stop",
+}
+
+
+def print_unloading_table(results: List[BenchmarkResult]) -> None:
+    """Print unloading-focused metrics: unload score and avg rehandles per container."""
+    ul_results = [r for r in results
+                  if r.config.scenario in UNLOADING_SCENARIOS]
+    if not ul_results:
+        return
+
+    print()
+    print("=" * 110)
+    print(" UNLOADING ORDER BENCHMARK — avg rehandles per container  (lower = better)")
+    print(" Rehandle = container that must be moved aside to access an earlier-stop container.")
+    print(" Same-stop containers above do NOT count (they unload together at that stop).")
+    print("=" * 110)
+
+    header = (
+        f"{'Ship':<10}  {'Scenario':<22}  {'Solver':<22}  "
+        f"{'Unload':>8}  {'Avg-Rhdl':>9}  {'Tot-Rhdl':>9}  {'Balance':>8}  {'Time(s)':>7}"
+    )
+    print(header)
+    print("-" * 110)
+
+    groups: dict = {}
+    for r in ul_results:
+        key = (r.config.ship_key, r.config.scenario, r.config.solver_name)
+        groups.setdefault(key, []).append(r)
+
+    prev_ship = None
+    for ship_key in ["coastal", "handymax", "panamax"]:
+        for scenario in UNLOADING_SCENARIOS:
+            for solver_name in SOLVERS:
+                key = (ship_key, scenario, solver_name)
+                if key not in groups:
+                    continue
+                seed_results = groups[key]
+                ok = [r for r in seed_results if not r.error]
+                skipped_all = all(r.error for r in seed_results)
+
+                if ship_key != prev_ship:
+                    if prev_ship is not None:
+                        print()
+                    prev_ship = ship_key
+
+                label = UNLOADING_CASE_LABELS.get(scenario, scenario)
+
+                if skipped_all:
+                    err_code = seed_results[0].error if seed_results else "SKIP"
+                    print(f"{ship_key:<10}  {label:<22}  {solver_name:<22}  "
+                          + "  ".join(["      N/A"] * 5)
+                          + f"  ({err_code})")
+                    continue
+
+                mean_ul    = sum(r.unloading_score for r in ok) / len(ok)
+                total_rh   = sum(r.rehandle_count  for r in ok)
+                total_pl   = sum(r.placed           for r in ok)
+                avg_rh     = total_rh / total_pl if total_pl else 0.0
+                mean_sc    = sum(r.final_score      for r in ok) / len(ok)
+                mean_time  = sum(r.runtime_s        for r in ok) / len(ok)
+
+                ul_str  = _fmt_ratio(mean_ul)
+                sc_str  = _fmt_ratio(mean_sc)
+                # Colour avg rehandles: green = 0, yellow < 0.5, red >= 0.5
+                rh_raw  = f"{avg_rh:.3f}"
+                if avg_rh == 0:
+                    rh_str = _maybe_color(rh_raw, _GREEN)
+                elif avg_rh < 0.5:
+                    rh_str = _maybe_color(rh_raw, _YELLOW)
+                else:
+                    rh_str = _maybe_color(rh_raw, _RED)
+
+                print(
+                    f"{ship_key:<10}  {label:<22}  {solver_name:<22}  "
+                    f"{ul_str:>8}  {rh_str:>9}  {total_rh:>9}  "
+                    f"{sc_str:>8}  {mean_time:>7.2f}"
+                )
+
+    print("=" * 110)
+
+
+# ---------------------------------------------------------------------------
+# Parallel execution helper
+# ---------------------------------------------------------------------------
+
+def _run_parallel(configs: List[BenchmarkConfig], n_workers: int) -> List[BenchmarkResult]:
+    """Run benchmark configs in parallel (or sequentially when n_workers==1).
+
+    Results are returned in the same order as *configs*.  Progress lines are
+    printed as each trial completes (arrival order when parallel).
+    """
+    total = len(configs)
+    results: List[Optional[BenchmarkResult]] = [None] * total
+
+    if n_workers == 1:
+        for i, cfg in enumerate(configs):
+            result = _run_one(cfg)
+            results[i] = result
+            _print_progress(i + 1, total, cfg, result)
+        return results  # type: ignore[return-value]
+
+    done = 0
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        future_to_idx = {executor.submit(_run_one, cfg): i
+                         for i, cfg in enumerate(configs)}
+        for future in as_completed(future_to_idx):
+            idx    = future_to_idx[future]
+            result = future.result()
+            results[idx] = result
+            done += 1
+            _print_progress(done, total, configs[idx], result)
+
+    return results  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
 # Benchmark runners
 # ---------------------------------------------------------------------------
 
@@ -534,6 +835,8 @@ def run_standard_benchmark(
     scenarios: List[str],
     solvers: List[str],
     seeds: List[int],
+    n_workers: int = 1,
+    skip_keys: set = None,
 ) -> List[BenchmarkResult]:
     """Run all (ship × scenario × solver × seed) combinations."""
     configs = [
@@ -550,21 +853,69 @@ def run_standard_benchmark(
         for seed     in seeds
     ]
 
-    results: List[BenchmarkResult] = []
+    if skip_keys:
+        all_count = len(configs)
+        configs = [c for c in configs
+                   if (c.ship_key, c.scenario, c.solver_name, c.model_key, c.seed)
+                   not in skip_keys]
+        skipped = all_count - len(configs)
+        if skipped:
+            print(f"  (Skipping {skipped} trials already cached for version {ALGO_VERSION})")
+
     total = len(configs)
     print(f"\nRunning standard benchmark: {total} trials "
           f"({len(ships)} ships × {len(scenarios)} scenarios × "
-          f"{len(solvers)} solvers × {len(seeds)} seeds)\n")
+          f"{len(solvers)} solvers × {len(seeds)} seeds)"
+          + (f"  [workers={n_workers}]" if n_workers > 1 else "") + "\n")
 
-    for i, cfg in enumerate(configs, 1):
-        result = _run_one(cfg)
-        results.append(result)
-        _print_progress(i, total, cfg, result)
-
-    return results
+    return _run_parallel(configs, n_workers)
 
 
-def run_transfer_benchmark(seeds: List[int]) -> List[BenchmarkResult]:
+def run_unloading_benchmark(
+    ships: List[str],
+    solvers: List[str],
+    seeds: List[int],
+    n_workers: int = 1,
+    skip_keys: set = None,
+) -> List[BenchmarkResult]:
+    """Run all (ship × unloading_scenario × solver × seed) combinations."""
+    configs = [
+        BenchmarkConfig(
+            ship_key=ship,
+            scenario=scenario,
+            solver_name=solver,
+            model_key=ship,
+            seed=seed,
+        )
+        for ship     in ships
+        for scenario in UNLOADING_SCENARIOS
+        for solver   in solvers
+        for seed     in seeds
+    ]
+
+    if skip_keys:
+        all_count = len(configs)
+        configs = [c for c in configs
+                   if (c.ship_key, c.scenario, c.solver_name, c.model_key, c.seed)
+                   not in skip_keys]
+        skipped = all_count - len(configs)
+        if skipped:
+            print(f"  (Skipping {skipped} trials already cached for version {ALGO_VERSION})")
+
+    total = len(configs)
+    print(f"\nRunning unloading benchmark: {total} trials "
+          f"({len(ships)} ships × {len(UNLOADING_SCENARIOS)} scenarios × "
+          f"{len(solvers)} solvers × {len(seeds)} seeds)"
+          + (f"  [workers={n_workers}]" if n_workers > 1 else "") + "\n")
+
+    return _run_parallel(configs, n_workers)
+
+
+def run_transfer_benchmark(
+    seeds: List[int],
+    n_workers: int = 1,
+    skip_keys: set = None,
+) -> List[BenchmarkResult]:
     """Run all 9 ship × model combos for each ML solver on the balanced scenario."""
     configs = [
         BenchmarkConfig(
@@ -574,22 +925,26 @@ def run_transfer_benchmark(seeds: List[int]) -> List[BenchmarkResult]:
             model_key=model_key,
             seed=seed,
         )
-        for solver_name      in ML_SOLVERS
+        for solver_name           in ML_SOLVERS
         for (ship_key, model_key) in TRANSFER_COMBOS
-        for seed             in seeds
+        for seed                  in seeds
     ]
 
-    results: List[BenchmarkResult] = []
+    if skip_keys:
+        all_count = len(configs)
+        configs = [c for c in configs
+                   if (c.ship_key, c.scenario, c.solver_name, c.model_key, c.seed)
+                   not in skip_keys]
+        skipped = all_count - len(configs)
+        if skipped:
+            print(f"  (Skipping {skipped} trials already cached for version {ALGO_VERSION})")
+
     total = len(configs)
     print(f"\nRunning transfer benchmark: {total} trials "
-          f"(ML solvers × 9 ship/model combos × {len(seeds)} seeds)\n")
+          f"(ML solvers × 9 ship/model combos × {len(seeds)} seeds)"
+          + (f"  [workers={n_workers}]" if n_workers > 1 else "") + "\n")
 
-    for i, cfg in enumerate(configs, 1):
-        result = _run_one(cfg)
-        results.append(result)
-        _print_progress(i, total, cfg, result)
-
-    return results
+    return _run_parallel(configs, n_workers)
 
 
 # ---------------------------------------------------------------------------
@@ -599,22 +954,37 @@ def run_transfer_benchmark(seeds: List[int]) -> List[BenchmarkResult]:
 def save_results(
     standard: List[BenchmarkResult],
     transfer: List[BenchmarkResult],
+    unloading: List[BenchmarkResult],
     output_path: Path,
+    existing: dict = None,
 ) -> None:
     """Serialise benchmark results to JSON for the Streamlit benchmarks page."""
     import json
     from datetime import datetime
 
+    existing = existing or {"standard": [], "transfer": [], "unloading": []}
+
+    new_std_dicts = [r.to_dict() for r in standard]
+    new_ul_dicts  = [r.to_dict() for r in unloading]
+    new_tr_dicts  = [r.to_dict() for r in transfer]
+
+    # "standard" key stores standard + unloading results (existing structure preserved)
+    all_std_dicts = existing["standard"] + new_std_dicts + new_ul_dicts
+    all_tr_dicts  = existing["transfer"] + new_tr_dicts
+    all_ul_dicts  = existing["unloading"] + new_ul_dicts
+
     payload = {
         "metadata": {
             "generated_at":    datetime.now().isoformat(timespec="seconds"),
-            "ships_tested":    sorted({r.config.ship_key    for r in standard}),
-            "scenarios_tested": sorted({r.config.scenario   for r in standard}),
-            "solvers_tested":  sorted({r.config.solver_name for r in standard}),
-            "seeds":           sorted({r.config.seed        for r in standard}),
+            "algo_version":    ALGO_VERSION,
+            "ships_tested":    sorted({r["ship_key"]    for r in all_std_dicts}),
+            "scenarios_tested": sorted({r["scenario"]   for r in all_std_dicts}),
+            "solvers_tested":  sorted({r["solver_name"] for r in all_std_dicts}),
+            "seeds":           sorted({r["seed"]        for r in all_std_dicts}),
         },
-        "standard": [r.to_dict() for r in standard],
-        "transfer": [r.to_dict() for r in transfer],
+        "standard":  all_std_dicts,
+        "transfer":  all_tr_dicts,
+        "unloading": all_ul_dicts,
     }
     with open(output_path, "w") as fh:
         json.dump(payload, fh, indent=2)
@@ -662,19 +1032,58 @@ def main() -> None:
         help="Skip cross-ship transfer tests",
     )
     parser.add_argument(
+        "--no-unloading", action="store_true",
+        help="Skip unloading-order stress tests",
+    )
+    parser.add_argument(
         "--no-color", action="store_true",
         help="Disable ANSI colour output",
+    )
+    parser.add_argument(
+        "--workers", "-j", type=int, default=None, metavar="N",
+        help="Parallel worker processes (default: all CPU cores). Use 1 for sequential.",
     )
     parser.add_argument(
         "--output", type=Path,
         default=Path(__file__).parent / "benchmark_results.json",
         help="Output JSON file (default: benchmark_results.json)",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Re-run all trials even if cached for the current version",
+    )
+    parser.add_argument(
+        "--version", type=str, default=None, metavar="VER",
+        help=f"Override algo version tag for caching (default: {ALGO_VERSION}). "
+             "Use to re-run a specific historical version, e.g. --version 0.1.0",
+    )
     args = parser.parse_args()
+
+    # Allow overriding ALGO_VERSION at runtime (must happen before workers fork)
+    if args.version:
+        import sys as _sys
+        _sys.modules[__name__].ALGO_VERSION = args.version
 
     # Disable color when not a TTY or explicitly requested
     if args.no_color or not sys.stdout.isatty():
         _USE_COLOR = False
+
+    n_workers = args.workers if args.workers is not None else os.cpu_count() or 1
+    if n_workers > 1:
+        print(f"Parallel mode: {n_workers} worker processes  (use --workers 1 to disable)")
+
+    # --- Load existing results and compute skip sets ---
+    existing = _load_existing_results(args.output)
+    if args.force:
+        skip_std = skip_ul = skip_tr = set()
+        print(f"--force: ignoring cached results for version {ALGO_VERSION}")
+    else:
+        skip_std = _done_keys(existing["standard"])
+        skip_ul  = _done_keys(existing["unloading"])
+        skip_tr  = _done_keys(existing["transfer"])
+        if skip_std or skip_ul or skip_tr:
+            print(f"Version {ALGO_VERSION}: {len(skip_std)} standard, "
+                  f"{len(skip_ul)} unloading, {len(skip_tr)} transfer trials cached → will skip")
 
     t_start = time.perf_counter()
 
@@ -684,17 +1093,35 @@ def main() -> None:
         scenarios=args.scenarios,
         solvers=args.solvers,
         seeds=args.seeds,
+        n_workers=n_workers,
+        skip_keys=skip_std,
     )
     print_standard_table(std_results)
+
+    # --- Unloading-order benchmark ---
+    unloading_results: List[BenchmarkResult] = []
+    if not args.no_unloading:
+        unloading_results = run_unloading_benchmark(
+            ships=args.ships,
+            solvers=args.solvers,
+            seeds=args.seeds,
+            n_workers=n_workers,
+            skip_keys=skip_ul,
+        )
+        print_unloading_table(unloading_results)
 
     # --- Transfer benchmark ---
     transfer_results: List[BenchmarkResult] = []
     if not args.no_transfer:
-        transfer_results = run_transfer_benchmark(seeds=args.seeds)
+        transfer_results = run_transfer_benchmark(
+            seeds=args.seeds,
+            n_workers=n_workers,
+            skip_keys=skip_tr,
+        )
         print_transfer_table(transfer_results)
 
     # --- Persist to JSON ---
-    save_results(std_results, transfer_results, args.output)
+    save_results(std_results, transfer_results, unloading_results, args.output, existing)
 
     elapsed = time.perf_counter() - t_start
     print(f"\nTotal elapsed: {elapsed:.1f}s\n")

@@ -67,6 +67,7 @@ class BeamSearchSolver(BaseSolver):
         k_list: float     = 4.0,
         k_diag: float     = 6.0,
         k_stacking: float = 0.5,
+        k_unload: float   = 2.0,
     ):
         super().__init__(ship)
         self.beam_width  = beam_width
@@ -75,6 +76,7 @@ class BeamSearchSolver(BaseSolver):
         self.k_list      = k_list
         self.k_diag      = k_diag
         self.k_stacking  = k_stacking
+        self.k_unload    = k_unload
         self.manifest: List[Dict] = []
 
     # ------------------------------------------------------------------
@@ -112,7 +114,7 @@ class BeamSearchSolver(BaseSolver):
             self._tmp_ship(state),
             k_gz=self.k_gz, k_trim=self.k_trim,
             k_list=self.k_list, k_diag=self.k_diag,
-            k_stacking=self.k_stacking,
+            k_stacking=self.k_stacking, k_unload=self.k_unload,
         )
         loader._moment_z = state.moment_z
         loader._fp_w     = state.fp_w
@@ -151,6 +153,7 @@ class BeamSearchSolver(BaseSolver):
             "container_id": container.container_id,
             "size":   sz,
             "weight": w,
+            "facility": container.facility,
             "bay":    bay,
             "half":   half,
             "col":    col,
@@ -177,7 +180,7 @@ class BeamSearchSolver(BaseSolver):
     # ------------------------------------------------------------------
 
     def load(self, containers: List[ShippingContainer]) -> List[Dict]:
-        sorted_containers = sorted(containers, key=lambda c: (-c.weight, -c.size))
+        sorted_containers = sorted(containers, key=lambda c: (-c.weight, -c.facility, -c.size))
         beams: List[_BeamState] = [self._initial_state()]
 
         for container in sorted_containers:
@@ -196,6 +199,7 @@ class BeamSearchSolver(BaseSolver):
                         "container_id": container.container_id,
                         "size":   container.size,
                         "weight": container.weight,
+                        "facility": container.facility,
                         "bay": None, "half": None, "col": None, "tier": None,
                         "placed": False,
                     })

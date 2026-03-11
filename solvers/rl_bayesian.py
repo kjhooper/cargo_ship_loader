@@ -66,10 +66,10 @@ from algorithm import BaseSolver, CargoLoader
 # Constants
 # ---------------------------------------------------------------------------
 
-W_KEYS = ["k_gz", "k_trim", "k_list", "k_diag", "k_stacking"]
-W_MIN  = np.array([0.5,  0.5,  0.5,  0.5,  0.0],  dtype=np.float64)
-W_MAX  = np.array([12.0, 12.0, 12.0, 12.0, 2.0],  dtype=np.float64)
-N_MANIFEST_FEATURES = 8
+W_KEYS = ["k_gz", "k_trim", "k_list", "k_diag", "k_stacking", "k_unload"]
+W_MIN  = np.array([0.5,  0.5,  0.5,  0.5,  0.0, 0.0],  dtype=np.float64)
+W_MAX  = np.array([12.0, 12.0, 12.0, 12.0, 2.0, 6.0],  dtype=np.float64)
+N_MANIFEST_FEATURES = 10
 
 
 # ---------------------------------------------------------------------------
@@ -95,11 +95,16 @@ def _compute_manifest_features(
     5  weight_min  / max_w     lightest container
     6  total_w    / max_w      aggregate load fraction
     7  n_20ft / ship_length    20 ft bay density
+    8  n_stops / 5             distinct port stops (normalised)
+    9  frac_stop1              fraction of containers unloaded at first stop
     """
     weights = np.array([c.weight for c in containers], dtype=np.float64)
     n    = max(len(containers), 1)
     n20  = sum(1 for c in containers if c.size == 1)
     mw   = ship.max_weight + 1e-9
+    stops    = [c.facility for c in containers]
+    n_stops  = len(set(stops))
+    frac_s1  = sum(1 for s in stops if s == 1) / n
     return np.array([
         n   / 100.0,
         n20 / n,
@@ -109,6 +114,8 @@ def _compute_manifest_features(
         weights.min()   / mw,
         weights.sum()   / mw,
         n20 / max(ship.length, 1),
+        n_stops / 5.0,
+        frac_s1,
     ], dtype=np.float64)
 
 
@@ -144,15 +151,20 @@ def _random_containers(
     n_20ft: int, n_40ft: int,
     weight_min: float, weight_max: float,
     seed: int,
+    n_stops: int = 1,
 ) -> List[ShippingContainer]:
     rng = random.Random(seed)
     ShippingContainer.reset_id_counter()
+    def rand_facility() -> int:
+        return rng.randint(1, max(n_stops, 1))
     conts = (
         [ShippingContainer(size=1,
-                           weight=round(rng.uniform(weight_min, weight_max), 1))
+                           weight=round(rng.uniform(weight_min, weight_max), 1),
+                           facility=rand_facility())
          for _ in range(n_20ft)]
         + [ShippingContainer(size=2,
-                             weight=round(rng.uniform(weight_min, weight_max), 1))
+                             weight=round(rng.uniform(weight_min, weight_max), 1),
+                             facility=rand_facility())
            for _ in range(n_40ft)]
     )
     rng.shuffle(conts)
@@ -174,17 +186,20 @@ def _generate_il_data(
     rng: random.Random,
     n_20ft_max: int = 0,
     n_40ft_max: int = 0,
+    max_stops: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Run BayesOpt on n_il random manifests; collect (features, best_weights).
 
     Each episode's container count is sampled uniformly between n_20ft and
     n_20ft_max (n_40ft and n_40ft_max) so the IL teacher sees both normal and
     weight-overloaded manifests.  Pass n_20ft_max=0 to keep counts fixed.
+    n_stops is sampled uniformly from 1..max_stops each episode so the teacher
+    sees both single-stop and multi-stop manifests.
 
     Returns
     -------
     X : float64 array of shape (n_il, N_MANIFEST_FEATURES)
-    y : float64 array of shape (n_il, 5)  — one row per W_KEYS vector
+    y : float64 array of shape (n_il, 6)  — one row per W_KEYS vector
     """
     from solvers.bayesian_opt import BayesianOptSolver
 
@@ -194,10 +209,12 @@ def _generate_il_data(
     for il_ep in range(n_il):
         if il_ep % 10 == 0:
             print(f"    [IL data] episode {il_ep}/{n_il}", flush=True)
-        ep_n20  = rng.randint(n_20ft, n_20ft_max) if n_20ft_max > n_20ft else n_20ft
-        ep_n40  = rng.randint(n_40ft, n_40ft_max) if n_40ft_max > n_40ft else n_40ft
-        ep_seed = rng.randint(0, 2**31)
-        conts   = _random_containers(ep_n20, ep_n40, weight_min, weight_max, ep_seed)
+        ep_n20    = rng.randint(n_20ft, n_20ft_max) if n_20ft_max > n_20ft else n_20ft
+        ep_n40    = rng.randint(n_40ft, n_40ft_max) if n_40ft_max > n_40ft else n_40ft
+        ep_seed   = rng.randint(0, 2**31)
+        ep_stops  = rng.randint(1, max(max_stops, 1))
+        conts     = _random_containers(ep_n20, ep_n40, weight_min, weight_max, ep_seed,
+                                       n_stops=ep_stops)
 
         teach_ship = _fresh_ship(ref_ship)
         teacher    = BayesianOptSolver(teach_ship, n_trials=n_bayes, seed=ep_seed)
@@ -287,6 +304,7 @@ class RLBayesianSolver(BaseSolver):
         n_40ft_max: int   = 0,
         weight_min: float = 2_000.0,
         seed:       int   = 42,
+        max_stops:  int   = 3,
         ship_params: Optional[Dict[str, Any]] = None,
     ) -> "RLBayesianSolver":
         """Run IL pre-training then RWR fine-tuning."""
@@ -314,12 +332,13 @@ class RLBayesianSolver(BaseSolver):
         np_rng     = np.random.default_rng(seed)
 
         # ── Phase 1: Imitation Learning ──────────────────────────────────
-        print(f"  [IL] {n_il} BayesOpt episodes × {n_bayes} trials…")
+        print(f"  [IL] {n_il} BayesOpt episodes × {n_bayes} trials…", flush=True)
         t0_il = _time.perf_counter()
         X_il, y_il = _generate_il_data(
             ref_ship, n_il, n_bayes, weight_min, weight_max,
             n_20ft, n_40ft, rng,
             n_20ft_max=n_20ft_max, n_40ft_max=n_40ft_max,
+            max_stops=max_stops,
         )
         X_il_scaled = self._scaler.fit_transform(X_il)
         self._mlp.fit(X_il_scaled, y_il)
@@ -331,7 +350,7 @@ class RLBayesianSolver(BaseSolver):
         il_best_val_score  = round(float(getattr(self._mlp, "best_validation_score_", float("nan"))), 6)
 
         # ── Phase 2: RL fine-tuning via SIR ──────────────────────────────
-        print(f"  [RL] {n_rl} episodes × {n_samples} samples (SIR)…")
+        print(f"  [RL] {n_rl} episodes × {n_samples} samples (SIR)…", flush=True)
         t0_rl = _time.perf_counter()
         X_rl_list: List[np.ndarray] = []
         y_rl_list: List[np.ndarray] = []
@@ -341,14 +360,16 @@ class RLBayesianSolver(BaseSolver):
             ep_n20     = rng.randint(n_20ft, n_20ft_max) if n_20ft_max > n_20ft else n_20ft
             ep_n40     = rng.randint(n_40ft, n_40ft_max) if n_40ft_max > n_40ft else n_40ft
             ep_seed    = rng.randint(0, 2**31)
-            conts      = _random_containers(ep_n20, ep_n40, weight_min, weight_max, ep_seed)
+            ep_stops   = rng.randint(1, max(max_stops, 1))
+            conts      = _random_containers(ep_n20, ep_n40, weight_min, weight_max, ep_seed,
+                                            n_stops=ep_stops)
             feat       = _compute_manifest_features(conts, ref_ship)
             feat_scaled = self._scaler.transform(feat.reshape(1, -1))
             mu         = np.clip(self._mlp.predict(feat_scaled)[0], W_MIN, W_MAX)
 
             # Sample K weight vectors from Gaussian(mu, sigma^2 I)
             ep_np_rng = np.random.default_rng(rng.randint(0, 2**31))
-            noise     = ep_np_rng.standard_normal((n_samples, 5))
+            noise     = ep_np_rng.standard_normal((n_samples, len(W_KEYS)))
             w_samples = np.clip(mu + self.sigma * noise, W_MIN, W_MAX)
 
             # Evaluate each candidate

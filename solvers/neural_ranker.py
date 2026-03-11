@@ -315,6 +315,7 @@ class NeuralRankerSolver(BaseSolver):
         """Generate training data via Beam Search and fit the MLP."""
         import time as _time
         t0 = _time.perf_counter()
+        print(f"  [NeuralRanker] {n_episodes} BeamSearch episodes × beam_width={beam_width}…", flush=True)
 
         if ship_params is None:
             ship_params = dict(
@@ -429,6 +430,7 @@ class NeuralRankerSolver(BaseSolver):
                     "container_id": container.container_id,
                     "size":   container.size,
                     "weight": container.weight,
+                    "facility": container.facility,
                     "bay": None, "half": None, "col": None, "tier": None,
                     "placed": False,
                 })
@@ -446,6 +448,7 @@ class NeuralRankerSolver(BaseSolver):
                 "container_id": container.container_id,
                 "size":   container.size,
                 "weight": container.weight,
+                "facility": container.facility,
                 "bay":    best_bay,
                 "half":   best_half,
                 "col":    best_col,

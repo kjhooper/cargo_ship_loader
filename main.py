@@ -23,7 +23,7 @@ import random
 import sys
 import time
 
-from algorithm import CargoLoader
+from algorithm import BaseSolver, CargoLoader
 from models import CargoShip, ShippingContainer
 from visualizer import ComparisonVisualizer, visualize_hull_3d
 
@@ -91,16 +91,19 @@ def generate_containers(
     weight_min: float,
     weight_max: float,
     seed: int = 42,
+    n_stops: int = 1,
 ) -> list:
     rng = random.Random(seed)
     ShippingContainer.reset_id_counter()
     containers = []
     for _ in range(n_20ft):
         w = round(rng.uniform(weight_min, weight_max), 1)
-        containers.append(ShippingContainer(size=1, weight=w))
+        facility = rng.randint(1, n_stops)
+        containers.append(ShippingContainer(size=1, weight=w, facility=facility))
     for _ in range(n_40ft):
         w = round(rng.uniform(weight_min, weight_max), 1)
-        containers.append(ShippingContainer(size=2, weight=w))
+        facility = rng.randint(1, n_stops)
+        containers.append(ShippingContainer(size=2, weight=w, facility=facility))
     rng.shuffle(containers)
     return containers
 
@@ -309,6 +312,8 @@ def main() -> None:
                         help="SA iterations for simulated_annealing (default: 2000)")
     parser.add_argument("--no-viz", action="store_true",
                         help="Skip visualisation (useful in CI)")
+    parser.add_argument("--stops", type=int, default=1,
+                        help="Number of port stops for unloading order (1 = no constraint)")
     args = parser.parse_args()
 
     if args.benchmark:
@@ -328,7 +333,7 @@ def main() -> None:
 
     containers = generate_containers(
         n_20ft=60, n_40ft=25, weight_min=2000.0, weight_max=28000.0,
-        seed=args.seed,
+        seed=args.seed, n_stops=args.stops,
     )
 
     # --- Primary solver ---
@@ -341,6 +346,8 @@ def main() -> None:
     label = f"{args.solver} — seed {args.seed}  ({elapsed:.2f}s)"
     print_manifest(manifest, ship, label=label)
     print(f"  final_score() = {solver.final_score():.4f}")
+    u_score = BaseSolver.unloading_score(manifest)
+    print(f"  Unloading score : {u_score:.3f}  (1.000 = no violations, {args.stops} stops)")
 
     if args.compare or args.solver == "greedy":
         # --- Greedy reference run (second seed for standalone greedy demo) ---
@@ -348,7 +355,7 @@ def main() -> None:
             # Original demo: show two seeds side-by-side
             seed_b = 99
             ship_b = make_panamax_ship()
-            containers_b = generate_containers(60, 25, 2000.0, 28000.0, seed=seed_b)
+            containers_b = generate_containers(60, 25, 2000.0, 28000.0, seed=seed_b, n_stops=args.stops)
             manifest_b = CargoLoader(ship_b).load(containers_b)
             print_manifest(manifest_b, ship_b, label=f"Greedy — seed {seed_b}")
 
@@ -366,7 +373,7 @@ def main() -> None:
             # Compare chosen solver against greedy on the same containers
             ship_g = make_panamax_ship()
             ShippingContainer.reset_id_counter()
-            containers_g = generate_containers(60, 25, 2000.0, 28000.0, seed=args.seed)
+            containers_g = generate_containers(60, 25, 2000.0, 28000.0, seed=args.seed, n_stops=args.stops)
             manifest_g = CargoLoader(ship_g).load(containers_g)
             print_manifest(manifest_g, ship_g, label=f"Greedy — seed {args.seed}")
 
