@@ -101,7 +101,7 @@ UNLOADING_SCENARIOS = [
 MODELS_DIR = Path(__file__).parent / "models"
 
 # Increment when algorithm logic changes and all benchmarks should re-run
-ALGO_VERSION = "0.3.0"
+ALGO_VERSION = "1.0.0"
 
 # ML solvers that support cross-ship transfer tests
 ML_SOLVERS = ["neural_ranker", "rl_bayesian", "learned_defer"]

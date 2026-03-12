@@ -23,13 +23,21 @@ import streamlit as st
 # ── Path to benchmark results (always local, next to this file's parent) ───────
 _HERE = Path(__file__).resolve().parent          # .../pages/
 _ROOT = _HERE.parent                             # project root
-RESULTS_PATH = _ROOT / "benchmark_results.json"
+RESULTS_PATH    = _ROOT / "benchmark_results.json"
+RESULTS_PATH_V1 = _ROOT / "benchmark_results_v0.1.0.json"
+
+VERSION_FILES = {}
+if RESULTS_PATH.exists():
+    VERSION_FILES["v1.0.0 — Unloading constraint (current)"] = RESULTS_PATH
+if RESULTS_PATH_V1.exists():
+    VERSION_FILES["v0.1.0 — Balance only (main branch)"] = RESULTS_PATH_V1
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 SOLVER_ORDER = [
     "greedy", "beam_search", "simulated_annealing",
     "bayesian_opt", "neural_ranker", "rl_bayesian", "rl_bayesian_sa",
+    "defer", "learned_defer",
 ]
 SOLVER_DISPLAY = {
     "greedy":              "Greedy",
@@ -39,6 +47,8 @@ SOLVER_DISPLAY = {
     "neural_ranker":       "Neural Ranker",
     "rl_bayesian":         "RL Bayesian",
     "rl_bayesian_sa":      "RL Bayes + SA",
+    "defer":               "Defer",
+    "learned_defer":       "Learned Defer",
 }
 SHIP_ORDER = ["coastal", "handymax", "panamax"]
 SHIP_DISPLAY = {
@@ -55,7 +65,7 @@ SCENARIO_ORDER = [
     "balanced", "weight_limited", "space_limited", "mixed",
     "stop_early_heavy", "stop_early_light", "stop_uniform_3", "stop_many",
 ]
-ML_SOLVERS = ["neural_ranker", "rl_bayesian"]
+ML_SOLVERS = ["neural_ranker", "rl_bayesian", "learned_defer"]
 
 CASE_DEFS = {
     "balanced": {
@@ -221,14 +231,6 @@ _LEG_V = dict(   # vertical, right of chart
     title_font=dict(size=10, color="#94a3b8"),
 )
 
-# ── Page config ────────────────────────────────────────────────────────────────
-
-st.set_page_config(
-    page_title="Benchmarks — Cargo Ship Loader",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 st.markdown("""
 <style>
   .block-container { padding-top: 2rem; padding-bottom: 2rem; }
@@ -253,6 +255,10 @@ def _df(records: list) -> pd.DataFrame:
     df = pd.DataFrame(records)
     if "error" not in df.columns:
         df["error"] = None
+    # Convert list/dict columns to strings so Streamlit can hash the DataFrame
+    for col in df.columns:
+        if df[col].apply(lambda x: isinstance(x, (list, dict))).any():
+            df[col] = df[col].apply(lambda x: str(x) if isinstance(x, (list, dict)) else x)
     return df
 
 
@@ -333,9 +339,8 @@ def plot_runtime_bar(df: pd.DataFrame, ships: list, solvers: list) -> go.Figure:
         rows = agg[agg["ship_key"] == ship].copy()
         if rows.empty:
             continue
-        rows = rows.set_index("solver_name").reindex(
-            [s for s in SOLVER_ORDER if s in solvers and s in rows["solver_name"].values]
-        ).reset_index()
+        rows = rows.set_index("solver_name")
+        rows = rows.reindex([s for s in SOLVER_ORDER if s in solvers and s in rows.index]).reset_index()
         fig.add_trace(go.Bar(
             name=SHIP_DISPLAY.get(ship, ship),
             x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
@@ -414,9 +419,8 @@ def plot_case_scores(df: pd.DataFrame, scenario: str, ships: list, solvers: list
         rows = agg[agg["ship_key"] == ship].copy()
         if rows.empty:
             continue
-        rows = rows.set_index("solver_name").reindex(
-            [s for s in SOLVER_ORDER if s in solvers and s in rows["solver_name"].values]
-        ).reset_index()
+        rows = rows.set_index("solver_name")
+        rows = rows.reindex([s for s in SOLVER_ORDER if s in solvers and s in rows.index]).reset_index()
         fig.add_trace(go.Bar(
             name=SHIP_DISPLAY.get(ship, ship),
             x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
@@ -447,9 +451,8 @@ def plot_case_runtime(df: pd.DataFrame, scenario: str, ships: list, solvers: lis
         rows = agg[agg["ship_key"] == ship].copy()
         if rows.empty:
             continue
-        rows = rows.set_index("solver_name").reindex(
-            [s for s in SOLVER_ORDER if s in solvers and s in rows["solver_name"].values]
-        ).reset_index()
+        rows = rows.set_index("solver_name")
+        rows = rows.reindex([s for s in SOLVER_ORDER if s in solvers and s in rows.index]).reset_index()
         fig.add_trace(go.Bar(
             name=SHIP_DISPLAY.get(ship, ship),
             x=[SOLVER_DISPLAY.get(s, s) for s in rows["solver_name"]],
@@ -1237,8 +1240,22 @@ def plot_stop_rehandles_chart(
 # Page layout
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Version selector (sidebar — rendered before filters) ──────────────────────
+if len(VERSION_FILES) > 1:
+    _sel_ver = st.sidebar.selectbox(
+        "Results version",
+        list(VERSION_FILES.keys()),
+        key="bench_ver",
+        help="Switch between benchmark result files from different code versions.",
+    )
+    _active_path = VERSION_FILES[_sel_ver]
+elif VERSION_FILES:
+    _active_path = next(iter(VERSION_FILES.values()))
+else:
+    _active_path = RESULTS_PATH   # will trigger the "not found" error below
+
 # ── Load data ──────────────────────────────────────────────────────────────────
-data = load_results(str(RESULTS_PATH))
+data = load_results(str(_active_path))
 
 if data is None:
     st.title("📊 Benchmark Results")
@@ -1269,7 +1286,7 @@ with st.sidebar:
     st.title("📊 Benchmarks")
     meta = data.get("metadata", {})
     st.caption(
-        f"**Source:** `{RESULTS_PATH.name}`  \n"
+        f"**Source:** `{_active_path.name}`  \n"
         f"**Run:** {meta.get('generated_at', '?')[:19].replace('T', ' ')}  \n"
         f"**Records:** {len(df_std)} standard"
         + (f" · {len(df_tr)} transfer" if has_transfer else "")
@@ -1324,12 +1341,13 @@ with st.sidebar:
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_ov, tab_case, tab_ship, tab_flex, tab_unload, tab_raw = st.tabs([
+tab_ov, tab_case, tab_ship, tab_flex, tab_unload, tab_cmp, tab_raw = st.tabs([
     "🗺 Overview",
     "📋 Case Level",
     "🚢 Ship Level",
     "🔀 Flexibility",
     "⚓ Unloading Order",
+    "📈 Version Comparison",
     "🗄 Raw Data",
 ])
 
@@ -1349,7 +1367,7 @@ with tab_ov:
     with col_a:
         st.plotly_chart(
             plot_score_heatmap(df_std, sel_ships, sel_solvers),
-            use_container_width=True,
+            width="stretch",
         )
         st.caption(
             "Each cell = mean final score averaged over **all cases and all seeds** "
@@ -1358,7 +1376,7 @@ with tab_ov:
     with col_b:
         st.plotly_chart(
             plot_runtime_bar(df_std, sel_ships, sel_solvers),
-            use_container_width=True,
+            width="stretch",
         )
         st.caption(
             "Mean runtime per (solver, ship). Log scale — notice how runtimes "
@@ -1368,7 +1386,7 @@ with tab_ov:
     st.divider()
     st.plotly_chart(
         plot_score_vs_runtime(df_std, sel_ships, sel_solvers),
-        use_container_width=True,
+        width="stretch",
     )
     st.caption(
         "Each point = one (solver, ship) mean. "
@@ -1405,16 +1423,16 @@ with tab_case:
         with col_a:
             st.plotly_chart(
                 plot_case_scores(df_std, sel_case, sel_ships, sel_solvers),
-                use_container_width=True,
+                width="stretch",
             )
         with col_b:
             st.plotly_chart(
                 plot_case_runtime(df_std, sel_case, sel_ships, sel_solvers),
-                use_container_width=True,
+                width="stretch",
             )
         st.plotly_chart(
             plot_case_balance(df_std, sel_case, sel_ships, sel_solvers),
-            use_container_width=True,
+            width="stretch",
         )
         if sel_case in ("weight_limited", "space_limited"):
             st.divider()
@@ -1438,7 +1456,7 @@ with tab_case:
                         pivot.round(1).style.background_gradient(
                             cmap="RdYlGn", axis=None, vmin=0, vmax=100
                         ),
-                        use_container_width=True,
+                        width="stretch",
                     )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1469,16 +1487,16 @@ with tab_ship:
         with col_a:
             st.plotly_chart(
                 plot_ship_scores_by_case(df_std, sel_ship, sel_solvers),
-                use_container_width=True,
+                width="stretch",
             )
         with col_b:
             st.plotly_chart(
                 plot_ship_runtime_by_case(df_std, sel_ship, sel_solvers),
-                use_container_width=True,
+                width="stretch",
             )
         st.plotly_chart(
             plot_ship_seed_variance(df_std, sel_ship, sel_solvers),
-            use_container_width=True,
+            width="stretch",
         )
         st.caption(
             "Error bars show min and max score across seeds. "
@@ -1488,7 +1506,7 @@ with tab_ship:
             st.divider()
             st.plotly_chart(
                 plot_ship_cog(df_std, sel_ship, sel_solvers),
-                use_container_width=True,
+                width="stretch",
             )
             st.caption("Lower CoG = better metacentric stability.")
 
@@ -1515,14 +1533,14 @@ with tab_flex:
 
     stats = _flex_stats(df_std, sel_ships, sel_solvers)
     if not stats.empty:
-        st.plotly_chart(plot_flexibility_table(stats), use_container_width=True)
+        st.plotly_chart(plot_flexibility_table(stats), width="stretch")
 
     st.divider()
     col_a, col_b = st.columns([3, 2])
     with col_a:
         st.plotly_chart(
             plot_combo_heatmap(df_std, sel_ships, sel_solvers),
-            use_container_width=True,
+            width="stretch",
         )
         st.info(
             "**How to read this chart**\n\n"
@@ -1546,7 +1564,7 @@ with tab_flex:
     with col_b:
         radar = plot_radar(df_std, sel_ships, sel_solvers)
         if radar.data:
-            st.plotly_chart(radar, use_container_width=True)
+            st.plotly_chart(radar, width="stretch")
             st.caption(
                 "Spider chart: each axis = one case type. "
                 "Large, even polygon = flexible. Lopsided = specialist."
@@ -1555,7 +1573,7 @@ with tab_flex:
     st.divider()
     st.plotly_chart(
         plot_runtime_vs_score_scatter(df_std, sel_ships, sel_solvers),
-        use_container_width=True,
+        width="stretch",
     )
     st.caption(
         "Colour = case type · Shape = ship (circle/square/diamond) · Border = solver. "
@@ -1583,9 +1601,9 @@ with tab_flex:
             fig_s, fig_d, sigs = plot_transfer_pair(df_tr, solver)
             col_a, col_b = st.columns(2)
             with col_a:
-                st.plotly_chart(fig_s, use_container_width=True)
+                st.plotly_chart(fig_s, width="stretch")
             with col_b:
-                st.plotly_chart(fig_d, use_container_width=True)
+                st.plotly_chart(fig_d, width="stretch")
             if sigs:
                 st.warning(
                     "**Out-of-speciality degradation (Δ < −0.03):**  \n"
@@ -1677,13 +1695,13 @@ with tab_unload:
             key="ul_heatmap_view",
         )
         if heatmap_view == "Avg Rehandles":
-            st.plotly_chart(fig_rehandles, use_container_width=True)
+            st.plotly_chart(fig_rehandles, width="stretch")
             st.caption(
                 "Mean avg rehandles per container across ships and seeds. "
                 "**Green = fewer rehandles = better.** 0.0 = perfect ordering."
             )
         else:
-            st.plotly_chart(fig_unload_sc, use_container_width=True)
+            st.plotly_chart(fig_unload_sc, width="stretch")
             st.caption(
                 "Fraction of correctly-ordered stacked pairs. "
                 "**Green = more pairs in correct order = better.** 1.000 = no violations."
@@ -1701,7 +1719,7 @@ with tab_unload:
         )
         fig_cva = plot_conflict_vs_alignment(df_ul, _ships_t, _solvers_t)
         if fig_cva.data:
-            st.plotly_chart(fig_cva, use_container_width=True)
+            st.plotly_chart(fig_cva, width="stretch")
             st.caption(
                 "Smaller gap between 🔴 and 🟢 bars = solver is better at "
                 "overcoming the weight-vs-order conflict."
@@ -1739,13 +1757,13 @@ with tab_unload:
                     df_ul, _ships_t, _solvers_t, scenario_sel
                 )
                 if fig_sb.data:
-                    st.plotly_chart(fig_sb, use_container_width=True)
+                    st.plotly_chart(fig_sb, width="stretch")
                     st.caption(
                         "Solid = PS ratio · Dashed = FA ratio · Dotted = Diagonal ratio. "
                         "Each point is the mean across selected ships and seeds."
                     )
                 if fig_sr.data:
-                    st.plotly_chart(fig_sr, use_container_width=True)
+                    st.plotly_chart(fig_sr, width="stretch")
                     st.caption(
                         "Number of containers that must be moved aside at each stop to "
                         "access targets. Only containers staying aboard longer count. "
@@ -1779,10 +1797,159 @@ with tab_unload:
                 style.style.background_gradient(
                     subset=gradient_cols, cmap="RdYlGn", vmin=0.5, vmax=1.0
                 ) if gradient_cols else style,
-                use_container_width=True,
+                width="stretch",
                 height=380,
             )
             st.caption(f"{len(ul_raw)} rows shown.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Version Comparison
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_cmp:
+    st.subheader("Version Comparison — v0.1.0 vs v1.0.0")
+    st.caption(
+        "Compare balance scores across algorithm versions.  "
+        "**Δ score = v1.0.0 − v0.1.0** — green means the new version improved, "
+        "red means it regressed.  Only solvers and ships present in **both** "
+        "result files are shown."
+    )
+
+    _both_exist = RESULTS_PATH.exists() and RESULTS_PATH_V1.exists()
+    if not _both_exist:
+        missing = []
+        if not RESULTS_PATH.exists():
+            missing.append("`benchmark_results.json` (v1.0.0)")
+        if not RESULTS_PATH_V1.exists():
+            missing.append("`benchmark_results_v0.1.0.json` (v0.1.0)")
+        st.warning(
+            f"Comparison requires both result files. Missing: {', '.join(missing)}.  \n"
+            "Run `python benchmark.py` to generate current results."
+        )
+    else:
+        @st.cache_data(show_spinner=False)
+        def _load_both():
+            d1 = load_results(str(RESULTS_PATH_V1))
+            d3 = load_results(str(RESULTS_PATH))
+            return _df(d1.get("standard", [])), _df(d3.get("standard", []))
+
+        df_v1_std, df_v3_std = _load_both()
+
+        # Scenarios to include in comparison (standard only, both versions have these)
+        _std_scenarios = ["balanced", "weight_limited", "space_limited", "mixed"]
+
+        df_v1_cmp = _ok(df_v1_std[df_v1_std["scenario"].isin(_std_scenarios)].copy())
+        df_v3_cmp = _ok(df_v3_std[df_v3_std["scenario"].isin(_std_scenarios)].copy())
+
+        # Common solvers and ships
+        _common_solvers = sorted(
+            set(df_v1_cmp["solver_name"].unique()) & set(df_v3_cmp["solver_name"].unique()),
+            key=lambda s: SOLVER_ORDER.index(s) if s in SOLVER_ORDER else 99,
+        )
+        _common_ships = [s for s in SHIP_ORDER
+                         if s in df_v1_cmp["ship_key"].unique()
+                         and s in df_v3_cmp["ship_key"].unique()]
+
+        if not _common_solvers or not _common_ships:
+            st.info("No common solvers/ships found between the two result files.")
+        else:
+            # Build mean score tables
+            def _mean_score(df, solvers, ships):
+                rows = {}
+                for sv in solvers:
+                    rows[sv] = {}
+                    for sh in ships:
+                        sub = df[(df["solver_name"] == sv) & (df["ship_key"] == sh)]
+                        rows[sv][sh] = sub["final_score"].mean() if not sub.empty else float("nan")
+                return rows
+
+            sc_v1 = _mean_score(df_v1_cmp, _common_solvers, _common_ships)
+            sc_v3 = _mean_score(df_v3_cmp, _common_solvers, _common_ships)
+
+            # Delta heatmap
+            z_delta, text_delta = [], []
+            for sv in _common_solvers:
+                row_z, row_t = [], []
+                for sh in _common_ships:
+                    v1 = sc_v1[sv][sh]
+                    v3 = sc_v3[sv][sh]
+                    delta = (v3 - v1) if (v1 == v1 and v3 == v3) else float("nan")
+                    row_z.append(delta)
+                    row_t.append(f"Δ {delta:+.4f}" if delta == delta else "n/a")
+                z_delta.append(row_z)
+                text_delta.append(row_t)
+
+            x_labels = [SHIP_DISPLAY.get(s, s) for s in _common_ships]
+            y_labels  = [SOLVER_DISPLAY.get(s, s) for s in _common_solvers]
+
+            fig_delta = go.Figure(go.Heatmap(
+                z=z_delta,
+                x=x_labels,
+                y=y_labels,
+                text=text_delta,
+                texttemplate="%{text}",
+                textfont=dict(size=11),
+                colorscale="RdYlGn",
+                zmid=0,
+                zmin=-0.05,
+                zmax=0.05,
+                colorbar=dict(title="Δ score", tickformat="+.3f"),
+            ))
+            fig_delta.update_layout(
+                title="Δ Final Score  (v1.0.0 − v0.1.0) — standard scenarios",
+                height=max(300, 50 + 40 * len(_common_solvers)),
+                margin=dict(l=120, r=40, t=60, b=60),
+                template="plotly_dark",
+                paper_bgcolor="#0f172a",
+                plot_bgcolor="#1e293b",
+                yaxis=dict(autorange="reversed"),
+            )
+            st.plotly_chart(fig_delta, width="stretch")
+            st.caption(
+                "Green = v1.0.0 improved on this (ship, solver). "
+                "Red = v1.0.0 regressed.  Magnitude matters — differences < 0.005 are noise."
+            )
+
+            st.divider()
+
+            # Side-by-side bar chart averaged over all ships
+            st.subheader("Mean score by solver — all ships combined")
+            avg_v1 = {sv: float(np.nanmean([sc_v1[sv][sh] for sh in _common_ships]))
+                      for sv in _common_solvers}
+            avg_v3 = {sv: float(np.nanmean([sc_v3[sv][sh] for sh in _common_ships]))
+                      for sv in _common_solvers}
+
+            fig_bar = go.Figure()
+            fig_bar.add_trace(go.Bar(
+                name="v0.1.0",
+                x=[SOLVER_DISPLAY.get(s, s) for s in _common_solvers],
+                y=[avg_v1[s] for s in _common_solvers],
+                marker_color="#60a5fa",
+                text=[f"{avg_v1[s]:.4f}" for s in _common_solvers],
+                textposition="outside",
+            ))
+            fig_bar.add_trace(go.Bar(
+                name="v1.0.0",
+                x=[SOLVER_DISPLAY.get(s, s) for s in _common_solvers],
+                y=[avg_v3[s] for s in _common_solvers],
+                marker_color="#34d399",
+                text=[f"{avg_v3[s]:.4f}" for s in _common_solvers],
+                textposition="outside",
+            ))
+            _all_scores = [v for d in (avg_v1, avg_v3) for v in d.values() if v == v]
+            _ymin = max(min(_all_scores) - 0.02, 0.5) if _all_scores else 0.8
+            fig_bar.update_layout(
+                barmode="group",
+                height=420,
+                margin=dict(l=50, r=20, t=40, b=80),
+                yaxis=dict(title="Mean final score", range=[_ymin, 1.04]),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                template="plotly_dark",
+                paper_bgcolor="#0f172a",
+                plot_bgcolor="#1e293b",
+            )
+            st.plotly_chart(fig_bar, width="stretch")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1816,7 +1983,7 @@ with tab_raw:
         sub_raw[show_cols].sort_values(["ship_key", "scenario", "solver_name", "seed"])
         .reset_index(drop=True)
         .style.background_gradient(subset=["final_score"], cmap="RdYlGn", vmin=0.85, vmax=1.0),
-        use_container_width=True,
+        width="stretch",
         height=420,
     )
     st.caption(f"{len(sub_raw)} rows shown.")
