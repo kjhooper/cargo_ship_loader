@@ -4,6 +4,7 @@ Always available
 ----------------
   BeamSearchSolver           — Heuristic beam search           (H2)
   SimulatedAnnealingSolver   — Simulated annealing             (H3)
+  DeferSolver                — Rule-based deferred placement   (D1)
 
 Require optional dependencies
 -------------------------------
@@ -11,11 +12,13 @@ Require optional dependencies
   NeuralRankerSolver     — needs ``scikit-learn``              (M2)
   RLBayesianSolver       — needs ``scikit-learn`` + ``optuna`` (M3)
   RLBayesianSASolver     — needs ``scikit-learn`` + ``optuna`` (M3+H3)
+  LearnedDeferSolver     — needs ``scikit-learn``              (D2)
   generate_training_data — data generation helper for M2
 """
 
 from .beam_search import BeamSearchSolver
 from .simulated_annealing import SimulatedAnnealingSolver
+from .defer import DeferSolver
 
 try:
     from .bayesian_opt import BayesianOptSolver
@@ -37,12 +40,19 @@ try:
 except ImportError:
     pass
 
+try:
+    from .defer import LearnedDeferSolver
+except ImportError:
+    pass
+
 __all__ = [
     "BeamSearchSolver",
     "SimulatedAnnealingSolver",
+    "DeferSolver",
     "BayesianOptSolver",
     "NeuralRankerSolver",
     "RLBayesianSolver",
     "RLBayesianSASolver",
+    "LearnedDeferSolver",
     "generate_training_data",
 ]

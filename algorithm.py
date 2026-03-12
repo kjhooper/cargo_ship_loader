@@ -36,6 +36,194 @@ class BaseSolver(ABC):
 
         return (ps_ratio + fa_ratio + diag_ratio) / 3.0
 
+    @staticmethod
+    def unloading_score(manifest: List[Dict]) -> float:
+        """Fraction of same-column stacked container pairs in correct unloading order.
+
+        Correct: the upper container has facility <= lower container's facility
+        (it unloads at the same or earlier port, so it's already gone by the
+        time the lower container needs to be accessed).
+        Returns 1.0 when there are no violations or no stacked containers.
+        """
+        from collections import defaultdict
+        placed = [e for e in manifest if e.get("placed")]
+        if not placed:
+            return 1.0
+
+        col_map = defaultdict(list)
+        for e in placed:
+            pos = e["bay"] * 2 + (e.get("half") or 0)
+            col_map[e["col"]].append(
+                (e["tier"], e.get("facility", 1), pos, pos + e["size"])
+            )
+
+        violations = 0
+        total_pairs = 0
+        for entries in col_map.values():
+            for i, (tier_b, fac_b, s_b, e_b) in enumerate(entries):
+                for tier_a, fac_a, s_a, e_a in entries:
+                    if tier_a <= tier_b:
+                        continue
+                    if s_a >= e_b or s_b >= e_a:
+                        continue
+                    total_pairs += 1
+                    if fac_a > fac_b:   # upper goes to later port → blocks lower
+                        violations += 1
+
+        return 1.0 - violations / total_pairs if total_pairs > 0 else 1.0
+
+    @staticmethod
+    def rehandle_count(manifest: List[Dict]) -> int:
+        """Total rehandles needed to unload the entire manifest in port-stop order.
+
+        A rehandle is counted each time a container with a later facility must be
+        moved aside to access a container with an earlier facility below it.
+
+        Rule: containers going to the SAME port stop as the target do NOT count as
+        rehandles — they are being unloaded together at that stop and will simply
+        come off first (they're on top), requiring no extra moves.
+
+        Algorithm: simulate unloading stop-by-stop.  For each stop s, for every
+        container C at that stop, count all containers above C (same column,
+        overlapping bays, higher tier) that are still aboard and have facility > s.
+        Then remove all stop-s containers from the ship before moving on.
+        """
+        placed = [e for e in manifest if e.get("placed")]
+        if not placed:
+            return 0
+
+        all_stops = sorted(set(e.get("facility", 1) for e in placed))
+        if len(all_stops) == 1:
+            return 0  # single-destination: no rehandles possible
+
+        on_ship = {e["container_id"]: e for e in placed}
+        total = 0
+
+        for stop in all_stops:
+            to_unload = [e for e in on_ship.values() if e.get("facility", 1) == stop]
+
+            for target in to_unload:
+                t_col  = target["col"]
+                t_tier = target["tier"]
+                t_pos  = target["bay"] * 2 + (target.get("half") or 0)
+                t_end  = t_pos + target["size"]
+
+                for e in on_ship.values():
+                    if e["col"] != t_col or e["tier"] <= t_tier:
+                        continue
+                    e_pos = e["bay"] * 2 + (e.get("half") or 0)
+                    e_end = e_pos + e["size"]
+                    if e_pos >= t_end or e_end <= t_pos:
+                        continue
+                    # Overlapping, above target — only a rehandle if it stays aboard longer
+                    if e.get("facility", 1) > stop:
+                        total += 1
+
+            for e in to_unload:
+                on_ship.pop(e["container_id"], None)
+
+        return total
+
+    @staticmethod
+    def per_stop_balance(
+        manifest: List[Dict],
+        ship_length: int,
+        ship_max_width: int,
+    ) -> List[Dict]:
+        """For each port stop N (1 .. max_stop-1), compute:
+          - rehandles_at_stop: containers that must be moved aside to access
+            stop-N targets (they sit above a target and stay aboard longer)
+          - balance ratios of containers that REMAIN on board after stop N
+
+        Uses sequential on_ship tracking so rehandle counts reflect only
+        containers still aboard at the time of each stop.
+        Returns a list of dicts ordered by stop_completed.
+        Empty list if there is only one stop (nothing to track).
+        """
+        placed = [e for e in manifest if e.get("placed")]
+        all_stops = sorted(set(e.get("facility", 1) for e in placed))
+        if len(all_stops) <= 1:
+            return []
+
+        half_l = ship_length // 2           # fore-aft split (raw position index)
+        half_w = (ship_max_width + 1) // 2  # port-stbd split (matches CargoShip)
+
+        on_ship: Dict[int, Dict] = {e["container_id"]: e for e in placed}
+
+        results = []
+        for N in all_stops[:-1]:   # skip the final stop — empty ship, trivial
+            to_unload = [e for e in on_ship.values() if e.get("facility", 1) == N]
+
+            # Count rehandles: containers above each target that stay aboard longer
+            stop_rehandles = 0
+            for target in to_unload:
+                t_col  = target["col"]
+                t_tier = target["tier"]
+                t_pos  = target["bay"] * 2 + (target.get("half") or 0)
+                t_end  = t_pos + target["size"]
+                for e in on_ship.values():
+                    if e["col"] != t_col or e["tier"] <= t_tier:
+                        continue
+                    e_pos = e["bay"] * 2 + (e.get("half") or 0)
+                    e_end = e_pos + e["size"]
+                    if e_pos >= t_end or e_end <= t_pos:
+                        continue
+                    if e.get("facility", 1) > N:
+                        stop_rehandles += 1
+
+            # Remove unloaded containers before computing remaining balance
+            for e in to_unload:
+                on_ship.pop(e["container_id"], None)
+
+            remaining = list(on_ship.values())
+            if not remaining:
+                continue
+
+            port_w = stbd_w = fore_w = aft_w = 0.0
+            fp = fs = ap = as_ = 0.0
+
+            for e in remaining:
+                pos  = e["bay"] * 2 + (e.get("half") or 0)
+                size = e.get("size", 1)
+                col  = e["col"]
+                w    = e["weight"]
+                w_per_cell = w / size
+                for p in range(pos, pos + size):
+                    is_port = col < half_w
+                    is_fore = p < half_l
+                    if is_port:
+                        port_w += w_per_cell
+                    else:
+                        stbd_w += w_per_cell
+                    if is_fore:
+                        fore_w += w_per_cell
+                    else:
+                        aft_w += w_per_cell
+                    if is_fore and is_port:
+                        fp += w_per_cell
+                    elif is_fore:
+                        fs += w_per_cell
+                    elif is_port:
+                        ap += w_per_cell
+                    else:
+                        as_ += w_per_cell
+
+            max_ps = max(port_w, stbd_w)
+            max_fa = max(fore_w, aft_w)
+            d1, d2 = fp + as_, fs + ap
+            max_d  = max(d1, d2)
+
+            results.append({
+                "stop_completed":       N,
+                "rehandles_at_stop":    stop_rehandles,
+                "containers_remaining": len(remaining),
+                "weight_remaining":     round(sum(e["weight"] for e in remaining), 1),
+                "ps_ratio":   round(min(port_w, stbd_w) / max_ps if max_ps > 0 else 1.0, 6),
+                "fa_ratio":   round(min(fore_w, aft_w)  / max_fa if max_fa > 0 else 1.0, 6),
+                "diag_ratio": round(min(d1, d2)          / max_d  if max_d  > 0 else 1.0, 6),
+            })
+        return results
+
 
 class CargoLoader(BaseSolver):
     """Greedy single-pass solver.
@@ -47,11 +235,12 @@ class CargoLoader(BaseSolver):
     def __init__(
         self,
         ship: CargoShip,
-        k_gz: float      = 5.0,
-        k_trim: float    = 4.0,
-        k_list: float    = 4.0,
-        k_diag: float    = 6.0,
+        k_gz: float       = 5.0,
+        k_trim: float     = 4.0,
+        k_list: float     = 4.0,
+        k_diag: float     = 6.0,
         k_stacking: float = 0.5,
+        k_unload: float   = 2.0,
     ):
         super().__init__(ship)
         self.k_gz       = k_gz
@@ -59,6 +248,7 @@ class CargoLoader(BaseSolver):
         self.k_list     = k_list
         self.k_diag     = k_diag
         self.k_stacking = k_stacking
+        self.k_unload   = k_unload
 
         self.manifest: List[Dict] = []
         # Running sums — all O(1) per placement
@@ -152,6 +342,39 @@ class CargoLoader(BaseSolver):
                     aft_id = entry["container_id"]
         return fore_id is not None and aft_id is not None
 
+    def _unload_penalty(
+        self, container: ShippingContainer, bay: int, half, col: int, tier: int
+    ) -> float:
+        """Fraction of containers below this position whose facility is later
+        than container.facility (i.e. they should unload after the container
+        above but are physically blocked by it).
+
+        Returns violations / n_below in [0, 1].  Zero when tier == 0.
+        """
+        if tier == 0:
+            return 0.0
+
+        pos      = bay * 2 + (half if half is not None else 0)
+        cand_end = pos + container.size
+
+        violations = 0
+        n_below    = 0
+
+        for entry in self.manifest:
+            if not entry["placed"]:
+                continue
+            if entry["col"] != col or entry["tier"] >= tier:
+                continue
+            e_pos = entry["bay"] * 2 + (entry.get("half") or 0)
+            e_end = e_pos + entry["size"]
+            if e_pos >= cand_end or e_end <= pos:
+                continue
+            n_below += 1
+            if container.facility > entry.get("facility", 1):
+                violations += 1
+
+        return violations / n_below if n_below > 0 else 0.0
+
     def _score_position(
         self, container: ShippingContainer, bay: int, half, col: int, tier: int
     ) -> float:
@@ -186,6 +409,7 @@ class CargoLoader(BaseSolver):
         score -= self.k_trim      * trim_norm
         score -= self.k_list      * list_norm
         score -= self.k_diag      * diag_norm
+        score -= self.k_unload    * self._unload_penalty(container, bay, half, col, tier)
 
         if container.size == 2 and self._two_shorts_below(bay, col, tier):
             score += self.k_stacking
@@ -198,8 +422,8 @@ class CargoLoader(BaseSolver):
 
     def load(self, containers: List[ShippingContainer]) -> List[Dict]:
         """Place all containers and return the placement manifest."""
-        # Heaviest first; 40ft breaks ties (harder to place, reduce dead-ends)
-        sorted_containers = sorted(containers, key=lambda c: (-c.weight, -c.size))
+        # Heaviest first; latest facility (last to unload = goes deeper) breaks ties; 40ft last
+        sorted_containers = sorted(containers, key=lambda c: (-c.weight, -c.facility, -c.size))
 
         for container in sorted_containers:
             valid_positions = self._enumerate_valid_positions(container)
@@ -210,6 +434,7 @@ class CargoLoader(BaseSolver):
                         "container_id": container.container_id,
                         "size": container.size,
                         "weight": container.weight,
+                        "facility": container.facility,
                         "bay": None,
                         "half": None,
                         "col": None,
@@ -232,6 +457,7 @@ class CargoLoader(BaseSolver):
                     "container_id": container.container_id,
                     "size": container.size,
                     "weight": container.weight,
+                    "facility": container.facility,
                     "bay": best_bay,
                     "half": best_half,
                     "col": best_col,
