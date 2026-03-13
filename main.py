@@ -193,7 +193,7 @@ def _build_solver(name: str, ship: CargoShip, args: argparse.Namespace):
         if not _RL_BAYESIAN_AVAILABLE:
             sys.exit("RLBayesianSolver requires scikit-learn and optuna")
         from pathlib import Path
-        pkl = Path(__file__).parent / "models" / "rl_bayesian_panamax.pkl"
+        pkl = Path(__file__).parent / "models" / "v1.0.0" / "rl_bayesian_panamax.pkl"
         if pkl.exists():
             print(f"  [rl_bayesian] Loading pre-trained model from {pkl.name}…")
             solver = RLBayesianSolver.load_model(ship, str(pkl))
@@ -208,7 +208,7 @@ def _build_solver(name: str, ship: CargoShip, args: argparse.Namespace):
         if not _RL_BAYESIAN_SA_AVAILABLE:
             sys.exit("RLBayesianSASolver requires scikit-learn and optuna")
         from pathlib import Path
-        pkl = Path(__file__).parent / "models" / "rl_bayesian_panamax.pkl"
+        pkl = Path(__file__).parent / "models" / "v1.0.0" / "rl_bayesian_panamax.pkl"
         return RLBayesianSASolver(
             ship,
             n_iterations=args.n_iterations,

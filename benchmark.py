@@ -98,7 +98,7 @@ UNLOADING_SCENARIOS = [
     "stop_many",          # 5 stops, uniform weights   → high-complexity ordering
 ]
 
-MODELS_DIR = Path(__file__).parent / "models"
+MODELS_DIR = Path(__file__).parent / "models" / "v1.0.0"
 
 # Increment when algorithm logic changes and all benchmarks should re-run
 ALGO_VERSION = "1.0.0"

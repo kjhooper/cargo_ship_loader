@@ -18,8 +18,12 @@ from solvers.neural_ranker import NeuralRankerSolver
 from solvers.rl_bayesian import RLBayesianSolver
 from solvers.defer import LearnedDeferSolver
 
-MODELS_DIR = Path(__file__).parent / "models"
+MODELS_DIR     = Path(__file__).parent / "models"
+MODELS_DIR_V1  = MODELS_DIR / "v1.0.0"
+MODELS_DIR_V0  = MODELS_DIR / "v0.1.0"
 MODELS_DIR.mkdir(exist_ok=True)
+MODELS_DIR_V1.mkdir(exist_ok=True)
+MODELS_DIR_V0.mkdir(exist_ok=True)
 
 # ── Ship configurations ──────────────────────────────────────────────────────
 CONFIGS = [
@@ -93,12 +97,14 @@ def _print_stats(stats: dict) -> None:
         print(f"    samples:        {stats.get('n_samples','?')}  features: {stats.get('n_features','?')}")
 
 
-def pretrain_all(configs=None):
+def pretrain_neural_ranker(configs=None, models_dir=None, label_suffix=""):
+    if models_dir is None:
+        models_dir = MODELS_DIR_V1
     total_t0 = time.perf_counter()
     all_stats = {}
 
     for cfg in (configs if configs is not None else CONFIGS):
-        out_path = MODELS_DIR / f"neural_ranker_{cfg['key']}.pkl"
+        out_path = models_dir / f"neural_ranker_{cfg['key']}.pkl"
         print(f"\n{'─' * 60}", flush=True)
         print(f"Training: {cfg['label']}", flush=True)
         print(f"  episodes={cfg['n_episodes']}  beam_width=5", flush=True)
@@ -126,11 +132,15 @@ def pretrain_all(configs=None):
 
     total = time.perf_counter() - total_t0
     print(f"\n{'─' * 60}")
-    print(f"All Neural Ranker models trained in {total:.1f}s")
-    print(f"Files in {MODELS_DIR}:")
-    for f in sorted(MODELS_DIR.glob("neural_ranker_*.pkl")):
+    print(f"All Neural Ranker{label_suffix} models trained in {total:.1f}s")
+    print(f"Files in {models_dir}:")
+    for f in sorted(models_dir.glob("neural_ranker_*.pkl")):
         print(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
     return all_stats
+
+
+def pretrain_all(configs=None):
+    return pretrain_neural_ranker(configs, models_dir=MODELS_DIR_V1)
 
 
 RL_CONFIGS = [
@@ -184,7 +194,7 @@ def pretrain_rl_bayesian(configs=None):
     all_stats = {}
 
     for cfg in (configs if configs is not None else RL_CONFIGS):
-        out_path = MODELS_DIR / f"rl_bayesian_{cfg['key']}.pkl"
+        out_path = MODELS_DIR_V1 / f"rl_bayesian_{cfg['key']}.pkl"
         print(f"\n{'─' * 60}", flush=True)
         print(f"Training: {cfg['label']}", flush=True)
         print(f"  n_il={cfg['n_il']}  n_bayes={cfg['n_bayes']}  "
@@ -216,8 +226,8 @@ def pretrain_rl_bayesian(configs=None):
     total = time.perf_counter() - total_t0
     print(f"\n{'─' * 60}")
     print(f"All RL Bayesian models trained in {total:.1f}s")
-    print(f"Files in {MODELS_DIR}:")
-    for f in sorted(MODELS_DIR.glob("rl_bayesian_*.pkl")):
+    print(f"Files in {MODELS_DIR_V1}:")
+    for f in sorted(MODELS_DIR_V1.glob("rl_bayesian_*.pkl")):
         print(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
     return all_stats
 
@@ -256,11 +266,56 @@ DEFER_CONFIGS = [
 ]
 
 
+def pretrain_rl_bayesian_classic(configs=None):
+    """Retrain RLBayesian with max_stops=1 (no unloading bias) for Classic Simulation."""
+    total_t0 = time.perf_counter()
+    all_stats = {}
+
+    for cfg in (configs if configs is not None else RL_CONFIGS):
+        out_path = MODELS_DIR_V0 / f"rl_bayesian_{cfg['key']}.pkl"
+        print(f"\n{'─' * 60}", flush=True)
+        print(f"Training (classic): {cfg['label']}", flush=True)
+        print(f"  n_il={cfg['n_il']}  n_bayes={cfg['n_bayes']}  "
+              f"n_rl={cfg['n_rl']}  n_samples={cfg['n_samples']}  max_stops=1", flush=True)
+        print(f"  containers: {cfg['n_20ft']} × 20 ft  +  {cfg['n_40ft']} × 40 ft", flush=True)
+
+        ship   = CargoShip(**cfg["ship_params"])
+        solver = RLBayesianSolver(ship)
+        solver.fit(
+            n_il        = cfg["n_il"],
+            n_bayes     = cfg["n_bayes"],
+            n_rl        = cfg["n_rl"],
+            n_samples   = cfg["n_samples"],
+            n_20ft      = cfg["n_20ft"],
+            n_40ft      = cfg["n_40ft"],
+            n_20ft_max  = cfg.get("n_20ft_max", 0),
+            n_40ft_max  = cfg.get("n_40ft_max", 0),
+            weight_min  = 2_000.0,
+            max_stops   = 1,
+            seed        = 42,
+            ship_params = cfg["ship_params"],
+        )
+        solver.save(str(out_path))
+
+        stats = getattr(solver, "training_stats_", {})
+        all_stats[f"rl_bayesian_{cfg['key']}"] = stats
+        print(f"  ✓ saved → {out_path}  ({stats.get('elapsed_s', '?')}s)", flush=True)
+        _print_stats(stats)
+
+    total = time.perf_counter() - total_t0
+    print(f"\n{'─' * 60}")
+    print(f"All RL Bayesian (classic) models trained in {total:.1f}s")
+    print(f"Files in {MODELS_DIR_V0}:")
+    for f in sorted(MODELS_DIR_V0.glob("rl_bayesian_*.pkl")):
+        print(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
+    return all_stats
+
+
 def pretrain_learned_defer(configs=None):
     total_t0 = time.perf_counter()
 
     for cfg in (configs if configs is not None else DEFER_CONFIGS):
-        out_path = MODELS_DIR / f"learned_defer_{cfg['key']}.pkl"
+        out_path = MODELS_DIR_V1 / f"learned_defer_{cfg['key']}.pkl"
         print(f"\n{'─' * 60}", flush=True)
         print(f"Training: {cfg['label']}", flush=True)
         print(f"  episodes={cfg['n_episodes']}  max_stops={cfg['max_stops']}", flush=True)
@@ -284,8 +339,8 @@ def pretrain_learned_defer(configs=None):
     total = time.perf_counter() - total_t0
     print(f"\n{'─' * 60}")
     print(f"All Learned Defer models trained in {total:.1f}s", flush=True)
-    print(f"Files in {MODELS_DIR}:")
-    for f in sorted(MODELS_DIR.glob("learned_defer_*.pkl")):
+    print(f"Files in {MODELS_DIR_V1}:")
+    for f in sorted(MODELS_DIR_V1.glob("learned_defer_*.pkl")):
         print(f"  {f.name}  ({f.stat().st_size / 1024:.0f} KB)")
 
 
@@ -295,10 +350,11 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python pretrain_models.py                          # train all\n"
-            "  python pretrain_models.py --solvers learned_defer  # defer only\n"
+            "  python pretrain_models.py                               # train all v1.0.0\n"
+            "  python pretrain_models.py --classic                     # train all v0.1.0 (classic)\n"
+            "  python pretrain_models.py --solvers learned_defer       # defer only\n"
             "  python pretrain_models.py --solvers neural_ranker rl_bayesian\n"
-            "  python pretrain_models.py --ships coastal          # one ship size\n"
+            "  python pretrain_models.py --ships coastal               # one ship size\n"
         ),
     )
     parser.add_argument(
@@ -306,6 +362,10 @@ if __name__ == "__main__":
         choices=["neural_ranker", "rl_bayesian", "learned_defer"],
         default=["neural_ranker", "rl_bayesian", "learned_defer"],
         help="Which solver families to train (default: all)",
+    )
+    parser.add_argument(
+        "--classic", action="store_true",
+        help="Train v0.1.0 classic models (balance-only, no unloading bias) → models/v0.1.0/",
     )
     parser.add_argument(
         "--ships", nargs="+",
@@ -318,20 +378,32 @@ if __name__ == "__main__":
     nr_stats = {}
     rl_stats = {}
 
-    if "neural_ranker" in args.solvers:
-        cfgs = [c for c in CONFIGS if c["key"] in args.ships]
-        nr_stats = pretrain_all(cfgs)
+    if args.classic:
+        if "neural_ranker" in args.solvers:
+            cfgs = [c for c in CONFIGS if c["key"] in args.ships]
+            nr_stats = pretrain_neural_ranker(cfgs, models_dir=MODELS_DIR_V0, label_suffix=" (classic)")
 
-    if "rl_bayesian" in args.solvers:
-        cfgs = [c for c in RL_CONFIGS if c["key"] in args.ships]
-        rl_stats = pretrain_rl_bayesian(cfgs)
+        if "rl_bayesian" in args.solvers:
+            cfgs = [c for c in RL_CONFIGS if c["key"] in args.ships]
+            rl_stats = pretrain_rl_bayesian_classic(cfgs)
 
-    if "learned_defer" in args.solvers:
-        cfgs = [c for c in DEFER_CONFIGS if c["key"] in args.ships]
-        pretrain_learned_defer(cfgs)
+        stats_path = MODELS_DIR_V0 / "training_stats.json"
+    else:
+        if "neural_ranker" in args.solvers:
+            cfgs = [c for c in CONFIGS if c["key"] in args.ships]
+            nr_stats = pretrain_all(cfgs)
+
+        if "rl_bayesian" in args.solvers:
+            cfgs = [c for c in RL_CONFIGS if c["key"] in args.ships]
+            rl_stats = pretrain_rl_bayesian(cfgs)
+
+        if "learned_defer" in args.solvers:
+            cfgs = [c for c in DEFER_CONFIGS if c["key"] in args.ships]
+            pretrain_learned_defer(cfgs)
+
+        stats_path = MODELS_DIR_V1 / "training_stats.json"
 
     if nr_stats or rl_stats:
-        stats_path = MODELS_DIR / "training_stats.json"
         # Merge with existing stats so we don't wipe unrelated entries
         existing = {}
         if stats_path.exists():

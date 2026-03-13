@@ -59,7 +59,7 @@ try:
 except ImportError:
     _RL_BAYESIAN_SA = False
 
-MODELS_DIR = Path(__file__).parent.parent / "models"
+MODELS_DIR = Path(__file__).parent.parent / "models" / "v0.1.0"
 
 # ── Pre-built ship configurations ────────────────────────────────────────────
 

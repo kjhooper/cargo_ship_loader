@@ -51,7 +51,7 @@ except ImportError:
 
 OUTPUT_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-MODELS_DIR = Path(__file__).parent / "models"
+MODELS_DIR = Path(__file__).parent / "models" / "v1.0.0"
 
 # ── Case study definitions ────────────────────────────────────────────────────
 
